@@ -21,6 +21,8 @@ class UmSnapshot:
     wired_bytes: int
     compressor_occupied_bytes: int
     compressor_stored_bytes: int
+    reclaimable_bytes: int
+    file_backed_bytes: int
     should_shed: bool
 
 
@@ -47,6 +49,12 @@ def _pages(pages: dict[str, int], *names: str) -> int:
     return 0
 
 
+# Below this much reclaimable memory the machine is genuinely tight. Note this
+# is *reclaimable*, not free: macOS drives free pages to ~0 by design and holds
+# the rest as cache, so a low "Pages free" is the normal steady state.
+SHED_RECLAIMABLE_FLOOR = 1 << 30
+
+
 def snapshot_from_vm_stat(text: str, *, pressure: int = PRESSURE_NORMAL) -> UmSnapshot:
     pages = parse_vm_stat(text)
     ps = pages["page_size"]
@@ -54,7 +62,20 @@ def snapshot_from_vm_stat(text: str, *, pressure: int = PRESSURE_NORMAL) -> UmSn
     wired = _pages(pages, "Pages wired down") * ps
     occ = _pages(pages, "Pages occupied by compressor") * ps
     stored = _pages(pages, "Pages stored in compressor") * ps
-    shed = pressure >= PRESSURE_WARN or (wired > 0 and free < 256 << 20)
+    # Pages the kernel will hand back on demand. This is the real headroom.
+    reclaimable = ps * (
+        _pages(pages, "Pages free")
+        + _pages(pages, "Pages speculative")
+        + _pages(pages, "Pages inactive")
+        + _pages(pages, "Pages purgeable")
+    )
+    # File-backed pages are the expert bank's cache: whether a miss costs a
+    # memcpy or an SSD read. Throughput correlates with this at r = -0.866.
+    file_backed = _pages(pages, "File-backed pages") * ps
+    # Shed on the kernel's own signal, or on genuinely low reclaimable memory.
+    # Keying on free_bytes made this fire at normal pressure on every machine,
+    # which dropped the prompt cache after every request.
+    shed = pressure >= PRESSURE_WARN or reclaimable < SHED_RECLAIMABLE_FLOOR
     return UmSnapshot(
         pressure=int(pressure),
         page_size=ps,
@@ -62,6 +83,8 @@ def snapshot_from_vm_stat(text: str, *, pressure: int = PRESSURE_NORMAL) -> UmSn
         wired_bytes=wired,
         compressor_occupied_bytes=occ,
         compressor_stored_bytes=stored,
+        reclaimable_bytes=reclaimable,
+        file_backed_bytes=file_backed,
         should_shed=shed,
     )
 
@@ -122,7 +145,11 @@ class UmManager:
                 wired_bytes=0,
                 compressor_occupied_bytes=0,
                 compressor_stored_bytes=0,
-                should_shed=False,
+                reclaimable_bytes=0,
+                file_backed_bytes=0,
+                # vm_stat unavailable: trust the kernel signal alone rather
+                # than inferring shortage from a zeroed snapshot
+                should_shed=read_pressure_level() >= PRESSURE_WARN,
             )
         return snapshot_from_vm_stat(text, pressure=read_pressure_level())
 

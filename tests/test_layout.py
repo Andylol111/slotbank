@@ -160,3 +160,76 @@ def test_speculative_check_rejects_untrimmable_cache():
     msg = check_speculative_supported([Trimmable(), Recurrent()])
     assert msg and "not trimmable" in msg and "Recurrent" in msg
     assert check_speculative_supported([]) is not None
+
+
+def test_hybrid_detected_from_config_without_loading():
+    from slotbank.admit import hybrid_from_config
+
+    # Qwen3.5-class: mixed layer types + full_attention_interval
+    assert hybrid_from_config(
+        {"text_config": {"layer_types": ["linear_attention"] * 3 + ["full_attention"],
+                         "full_attention_interval": 4}}
+    ) is not None
+    # interval alone is enough
+    assert hybrid_from_config({"full_attention_interval": 4}) is not None
+    # recurrent config keys
+    assert hybrid_from_config({"linear_conv_kernel_dim": 4}) is not None
+    # a plain attention MoE (OLMoE-class) is not hybrid
+    assert hybrid_from_config({"num_experts": 64, "num_experts_per_tok": 8}) is None
+    # uniform layer_types must not trip it
+    assert hybrid_from_config({"layer_types": ["full_attention"] * 16}) is None
+
+
+def test_capacity_for_budget_inverts_resident_bytes():
+    """A budget must translate to a capacity that actually fits it."""
+    from slotbank.layout import capacity_for_budget, resident_expert_bytes
+
+    stored, e, k = 19 * (1 << 30), 256, 8
+    for gib in (2, 3, 4, 6, 8):
+        c = capacity_for_budget(stored, e, k, gib << 30)
+        got = resident_expert_bytes(stored, c, e)
+        assert got <= (gib << 30) or c == 16, (gib, c, got)
+
+
+def test_capacity_for_budget_clamps():
+    """Below the non-expert floor, and above the whole bank, both stay sane."""
+    from slotbank.layout import capacity_for_budget, slot_floor
+
+    stored, e, k = 19 * (1 << 30), 256, 8
+    assert capacity_for_budget(stored, e, k, 1) == slot_floor(e, k)
+    assert capacity_for_budget(stored, e, k, 1 << 40) == e
+    assert capacity_for_budget(stored, e, k, 0) == slot_floor(e, k)
+    assert capacity_for_budget(0, e, k, 4 << 30) == slot_floor(e, k)
+
+
+def test_budget_env_drives_capacity(monkeypatch):
+    """SLOTBANK_BUDGET_GIB must actually reach the capacity policy.
+
+    The budget branch needs a memory card (stored_bytes), so it sits after the
+    um check; production always supplies one via UmManager. This pins that the
+    env var is honoured and that clearing it restores the normal policy.
+    """
+    from types import SimpleNamespace
+
+    from slotbank.expert_slots import _capacity_from_model
+
+    card = SimpleNamespace(n_routed_experts=256, top_k=8,
+                           stored_bytes=19 * (1 << 30), expert_param_frac=0.8)
+    profile = SimpleNamespace(max_working_set_bytes=16 * (1 << 30))
+    um = SimpleNamespace(card=card, profile=profile)
+    model = SimpleNamespace(args=SimpleNamespace(num_experts_per_tok=8, num_experts=256))
+
+    monkeypatch.delenv("SLOTBANK_BUDGET_GIB", raising=False)
+    default_c = _capacity_from_model(model, None, um=um)
+
+    monkeypatch.setenv("SLOTBANK_BUDGET_GIB", "2")
+    tight = _capacity_from_model(model, None, um=um)
+    monkeypatch.setenv("SLOTBANK_BUDGET_GIB", "8")
+    loose = _capacity_from_model(model, None, um=um)
+
+    assert tight < loose, (tight, loose)
+    assert tight <= default_c, "a 2 GiB budget must not exceed the default policy"
+
+    monkeypatch.setenv("SLOTBANK_BUDGET_GIB", "junk")
+    assert _capacity_from_model(model, None, um=um) == default_c, \
+        "a malformed budget must fall back, not crash"

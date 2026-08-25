@@ -139,6 +139,36 @@ def resident_expert_bytes(
     return int(shared + experts * (min(int(capacity), int(num_experts)) / int(num_experts)))
 
 
+def capacity_for_budget(
+    stored_bytes: int,
+    num_experts: int,
+    top_k: int,
+    budget_bytes: int,
+    *,
+    expert_param_frac: float = 0.8,
+) -> int:
+    """Largest slot capacity whose resident bytes fit ``budget_bytes``.
+
+    The inverse of :func:`resident_expert_bytes`. Non-expert weights are
+    resident no matter what, so a budget below that floor cannot be honoured --
+    the floor capacity is returned rather than a nonsensical zero, and the
+    caller is over budget by construction.
+    """
+    e = max(0, int(num_experts))
+    floor = slot_floor(e, top_k)
+    if e <= 0 or stored_bytes <= 0 or budget_bytes <= 0:
+        return floor
+    frac = min(1.0, max(0.0, float(expert_param_frac)))
+    shared = stored_bytes * (1.0 - frac)
+    experts = stored_bytes * frac
+    if experts <= 0:
+        return floor
+    room = int(budget_bytes) - shared
+    if room <= 0:
+        return floor
+    return min(e, max(floor, int(e * room / experts)))
+
+
 def slot_capacity(
     num_experts: int,
     top_k: int,

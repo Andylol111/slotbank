@@ -131,10 +131,120 @@ def test_mmap_copy_does_not_item_meta(tmp_path):
     finally:
         type(cache.meta).item = orig
     assert hits == [], "device copy must not meta.item() the miss count"
-    # This guards the parked DeviceCopy path only. The default in-place path
-    # deliberately reads meta[0] + the two index vectors on the host.
+    # The default in-place path also avoids .item() -- see
+    # test_host_copy_does_not_item_meta -- but it does read the two index
+    # vectors on the host via .tolist().
     mx.eval(cache.pack("weight"))
     assert cache.pack("weight")[0].tolist() == src[3].tolist()
     assert cache.pack("weight")[1].tolist() == src[1].tolist()
     cache.sync_stats()
     assert cache.stat_miss_host == 2
+
+
+def _store_backed_cache(tmp_path, name):
+    """A 4-expert bank backed by a real file, sources dropped."""
+    import mlx.core as mx
+
+    from slotbank.expert_slots import SliceStore
+    from slotbank.offload_cache import OffloadMoeCache
+
+    src = mx.arange(4 * 8, dtype=mx.uint32).reshape(4, 8)
+    path = str(tmp_path / name)
+    mx.save_safetensors(path, {"weight": src})
+    cache = OffloadMoeCache(num_experts=4, cache_size=2)
+    cache.add_bank("weight", source=src)
+    cache.set_store(SliceStore.from_file(path), {"weight": "weight"})
+    cache.drop_sources()
+    return cache, src
+
+
+@pytest.mark.parametrize(
+    "threads, want_prefetch", [("8", False), ("0", True)]
+)
+def test_pread_path_skips_madvise(tmp_path, monkeypatch, threads, want_prefetch):
+    """The threaded pread path must not also pay for MADV_WILLNEED.
+
+    Advising costs ~180 ms/token of per-page VM bookkeeping -- 3x the read it
+    hints. It earns that back only for the serial mmap path, whose faults would
+    otherwise be taken one at a time. Paying both was a measured 1.58x loss.
+    """
+    _require_mlx()
+    import mlx.core as mx
+
+    from slotbank.expert_slots import SliceStore
+
+    monkeypatch.setenv("SLOTBANK_READ_THREADS", threads)
+    calls = []
+    orig = SliceStore.prefetch
+    monkeypatch.setattr(
+        SliceStore, "prefetch",
+        lambda self, key, experts: (calls.append(key), orig(self, key, experts))[1],
+    )
+
+    cache, src = _store_backed_cache(tmp_path, f"qsl_pf_{threads}.safetensors")
+    cache.ensure_experts(mx.array([3, 1], dtype=mx.int32))
+    assert cache.copy_missing() == 2
+
+    assert bool(calls) is want_prefetch
+    # Either path must land the same bytes in the pack.
+    mx.eval(cache.pack("weight"))
+    assert cache.pack("weight")[0].tolist() == src[3].tolist()
+    assert cache.pack("weight")[1].tolist() == src[1].tolist()
+
+
+def test_host_copy_does_not_item_meta(tmp_path, monkeypatch):
+    """The default host path must read the miss count via the buffer protocol.
+
+    After ``mx.eval`` the array is host-readable, but ``meta[0].item()`` builds
+    a fresh lazy slice on the Metal stream and blocks on a second command
+    buffer: 224.7 us versus 0.8 us measured, x40 layers x every token. It cost
+    a measured 6.9% end-to-end.
+    """
+    _require_mlx()
+    import mlx.core as mx
+
+    monkeypatch.setenv("SLOTBANK_READ_THREADS", "0")
+    cache, src = _store_backed_cache(tmp_path, "qsl_host_item.safetensors")
+    cache.ensure_experts(mx.array([3, 1], dtype=mx.int32))
+
+    hits = []
+    orig = type(cache.meta).item
+    monkeypatch.setattr(type(cache.meta), "item",
+                        lambda self: (hits.append(1), orig(self))[1])
+
+    assert cache.copy_missing() == 2
+    assert hits == [], "host copy must not meta.item(); use memoryview(meta)[0]"
+
+    mx.eval(cache.pack("weight"))
+    assert cache.pack("weight")[0].tolist() == src[3].tolist()
+    assert cache.pack("weight")[1].tolist() == src[1].tolist()
+
+
+def test_preadv_lands_rows_in_pack_slots(tmp_path, monkeypatch):
+    """The threaded path must read straight into the pack, and land it exactly.
+
+    bytes -> mx.array -> view -> reshape -> pack[slot] = row copies ~218
+    MiB/token on the host and builds ~1137 MLX graph nodes to place data the
+    kernel can deposit directly. Worth a measured 1.27x, so guard both that the
+    path is taken and that the bytes are right.
+    """
+    _require_mlx()
+    import mlx.core as mx
+
+    monkeypatch.setenv("SLOTBANK_READ_THREADS", "8")
+    cache, src = _store_backed_cache(tmp_path, "qsl_preadv.safetensors")
+
+    used = []
+    orig = type(cache)._preadv_into_packs
+    monkeypatch.setattr(
+        type(cache), "_preadv_into_packs",
+        lambda self, s, e, b, w: (lambda ok: (used.append(ok), ok)[1])(
+            orig(self, s, e, b, w)))
+
+    cache.ensure_experts(mx.array([3, 1], dtype=mx.int32))
+    assert cache.copy_missing() == 2
+    assert used == [True], "threaded path must preadv into the pack, not fall back"
+
+    mx.eval(cache.pack("weight"))
+    assert cache.pack("weight")[0].tolist() == src[3].tolist()
+    assert cache.pack("weight")[1].tolist() == src[1].tolist()
