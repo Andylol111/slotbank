@@ -12,7 +12,6 @@ from slotbank.offload_cache import read_safetensors_layout
 
 DEFAULT_CAPACITY = 16  # decode LRU = 2× top-8; prefill does not pin
 PIN_AFTER = 8  # decode calls before frequency pins freeze
-# L2 is opt-in. Pressure stops new L2 inserts; it never deletes a resident expert.
 _SWITCH_TYPES = frozenset({"QuantizedSwitchLinear", "SwitchLinear"})
 _CONTAINER_TYPES = frozenset({"SwitchGLU", "SwitchMLP"})
 _KINDS = ("weight", "scales", "biases", "bias")
@@ -31,9 +30,26 @@ def _slots_mode() -> str:
     return raw if raw in {"ram", "auto", "full"} else "auto"
 
 
+def _budget_bytes() -> int:
+    """SLOTBANK_BUDGET_GIB: cap resident expert bytes, letting tok/s float."""
+    raw = os.environ.get("SLOTBANK_BUDGET_GIB", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(float(raw) * (1 << 30)))
+    except ValueError:
+        return 0
+
+
 def _capacity_from_model(model, capacity: int | None, um=None) -> int:
     if capacity is not None:
         return int(capacity)
+    override = os.environ.get("SLOTBANK_SLOTS_OVERRIDE", "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
     args = getattr(model, "args", None)
     if args is None:
         args = getattr(getattr(model, "model", None), "args", None)
@@ -48,6 +64,20 @@ def _capacity_from_model(model, capacity: int | None, um=None) -> int:
     card = getattr(um, "card", None)
     if profile is None or card is None or not getattr(card, "n_routed_experts", 0):
         return floor
+    budget = _budget_bytes()
+    if budget:
+        from slotbank.layout import capacity_for_budget
+
+        # A hard cap on wired bytes, letting throughput float. Raising C past
+        # the default is a measured loss on a machine where the bank does not
+        # fit in page cache, so this is a dial DOWN, not up.
+        return capacity_for_budget(
+            int(card.stored_bytes),
+            int(card.n_routed_experts or n_e or floor),
+            int(card.top_k or top_k or 8),
+            budget,
+            expert_param_frac=float(card.expert_param_frac or 0.8),
+        )
     from slotbank.layout import MIN_KV_BYTES, slot_capacity
 
     return slot_capacity(
@@ -75,23 +105,24 @@ def _waves_enabled() -> bool:
     )
 
 
-def _l2_default(l2: bool | None) -> bool:
-    if l2 is not None:
-        return bool(l2)
-    return os.environ.get("SLOTBANK_L2", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
 def _profile_path(model_path) -> Path | None:
+    """Cache key for the hot-expert profile.
+
+    Keyed on the resolved path, not the spelling. `.models/Qwen` and the
+    Hugging Face snapshot it links to are the same checkpoint; hashing the
+    string gave them different keys, so loading by the other spelling warmed
+    nothing and reported no error.
+    """
     if not model_path:
         return None
     import hashlib
+    import os
 
-    tag = hashlib.sha1(str(model_path).encode()).hexdigest()[:16]
+    try:
+        resolved = os.path.realpath(str(model_path))
+    except OSError:
+        resolved = str(model_path)
+    tag = hashlib.sha1(resolved.encode()).hexdigest()[:16]
     return Path.home() / ".cache" / "slotbank" / f"hot-{tag}.json"
 
 
@@ -167,18 +198,13 @@ def install_expert_slots(
     model,
     capacity: int | None = None,
     model_path: str | None = None,
-    l2: bool | None = None,
     um=None,
 ) -> int:
-    """Wrap every Switch* linear. No-op (0) on dense. L2 opt-in, never sheds."""
+    """Wrap every Switch* linear. No-op (0) on dense."""
     named = getattr(model, "named_modules", None)
     if named is None:
         return 0
     capacity = _capacity_from_model(model, capacity, um=um)
-    use_l2 = _l2_default(l2)
-    grow = True
-    if um is not None and getattr(um, "should_shed", None) and um.should_shed():
-        grow = False
     store = SliceStore.from_model_path(model_path) if model_path else None
     n = 0
     for name, mod in named():
@@ -192,8 +218,6 @@ def install_expert_slots(
             capacity,
             store=store if keys else None,
             keys=keys,
-            l2=use_l2,
-            grow_l2=grow,
         )
         n += 1
     for _name, mod in named():
@@ -208,32 +232,10 @@ def install_expert_slots(
     return n
 
 
-def set_l2_growth(model, grow: bool) -> int:
-    """Stop or resume *new* L2 inserts. Never deletes a resident expert."""
-    n = 0
-    modules = getattr(model, "modules", None)
-    if modules is None:
-        return 0
-    for mod in modules():
-        pack = getattr(mod, "_expert_slots", None)
-        if pack is None:
-            continue
-        pack.grow_l2 = bool(grow)
-        n += 1
-    return n
-
-
-def apply_um_pressure(model, um) -> bool:
-    """Pressure → stop *new* L2 inserts. Does not resize C or rewrite the pack."""
-    grow = um is None or not um.should_shed()
-    set_l2_growth(model, grow)
-    return grow
-
-
 def slot_stats(model) -> dict[str, int | float]:
     wrapped = filled = cap = 0
     decode_calls = decode_hits = decode_misses = prefill_calls = 0
-    file_misses = l2_hits = l1_hits = l2_experts = 0
+    file_misses = l1_hits = 0
     modules = getattr(model, "modules", None)
     empty = {
         "wrapped": 0,
@@ -244,9 +246,7 @@ def slot_stats(model) -> dict[str, int | float]:
         "decode_misses": 0,
         "prefill_calls": 0,
         "file_misses": 0,
-        "l2_hits": 0,
         "l1_hits": 0,
-        "l2_experts": 0,
         "misses_per_decode": 0.0,
     }
     if modules is None:
@@ -268,9 +268,7 @@ def slot_stats(model) -> dict[str, int | float]:
         decode_misses += pack.decode_misses
         prefill_calls += pack.prefill_calls
         file_misses += pack.file_misses
-        l2_hits += pack.l2_hits
         l1_hits += pack.l1_hits
-        l2_experts += len(pack._l2)
     return {
         "wrapped": wrapped,
         "filled_slots": filled,
@@ -280,9 +278,7 @@ def slot_stats(model) -> dict[str, int | float]:
         "decode_misses": decode_misses,
         "prefill_calls": prefill_calls,
         "file_misses": file_misses,
-        "l2_hits": l2_hits,
         "l1_hits": l1_hits,
-        "l2_experts": l2_experts,
         "misses_per_decode": (
             decode_misses / decode_calls if decode_calls else 0.0
         ),
@@ -319,13 +315,9 @@ def wrap_switch(
     capacity: int = DEFAULT_CAPACITY,
     store=None,
     keys=None,
-    l2: bool = False,
-    grow_l2: bool = True,
     pin_after: int = PIN_AFTER,
 ):
     pack = ExpertSlotPack.steal(mod, capacity)
-    pack.use_l2 = bool(l2)
-    pack.grow_l2 = bool(grow_l2)
     pack.pin_after = int(pin_after)
     if store is not None and keys:
         pack._store = store
@@ -395,6 +387,25 @@ def _patch_container(mod) -> None:
         })
         _CONTAINER_CLS[cls] = slotted
     mod.__class__ = slotted
+
+
+def _as_routing(slot_ids, indices):
+    """Give slot ids the routing tensor's shape.
+
+    ``ensure_experts`` returns them flat. At batch 1 that is (top_k,), which
+    broadcasts against (1, 1, top_k) by luck; at batch B it is (B*top_k,) and
+    ``gather_qmm`` rejects it. Reshaping makes the batch axis explicit instead
+    of relying on the accident.
+    """
+    if slot_ids is None:
+        return slot_ids
+    shape = tuple(int(d) for d in indices.shape)
+    n = 1
+    for d in shape:
+        n *= d
+    if int(slot_ids.size) != n:
+        return slot_ids
+    return slot_ids.reshape(shape)
 
 
 def _ensure_layer(packs, indices) -> None:
@@ -527,6 +538,14 @@ class SliceStore:
             except (OSError, ValueError):
                 return
 
+    def raw_fd(self, path: str) -> int:
+        """Cached read-only fd for pread/preadv. One per shard, never closed."""
+        fd = self._rawfds.get(path)
+        if fd is None:
+            fd = os.open(path, os.O_RDONLY)
+            self._rawfds[path] = fd
+        return fd
+
     def pread_row(self, tensor_key: str, expert: int):
         """Raw row bytes via pread. Unlike an mmap slice this releases the GIL,
         so a pool of these actually runs on more than one core."""
@@ -534,10 +553,7 @@ class SliceStore:
         if spec is None:
             return None
         off, row_bytes = self._row_span(spec, expert)
-        fd = self._rawfds.get(spec["path"])
-        if fd is None:
-            fd = os.open(spec["path"], os.O_RDONLY)
-            self._rawfds[spec["path"]] = fd
+        fd = self.raw_fd(spec["path"])
         out = os.pread(fd, row_bytes, off)
         while len(out) < row_bytes:
             more = os.pread(fd, row_bytes - len(out), off + len(out))
@@ -616,16 +632,12 @@ class ExpertSlotPack:
         self.decode_misses = 0
         self.prefill_calls = 0
         self.file_misses = 0
-        self.l2_hits = 0
         self.l1_hits = 0
-        self.use_l2 = False
         self.use_waves = _waves_enabled()
-        self.grow_l2 = True
         self.pin_after = PIN_AFTER
         self._pins_ready = False
         self._pinned: set[int] = set()
         self._freq: list[int] = []
-        self._l2: dict[int, dict[str, object]] = {}
         self.cache = None
         self._ready_slot_ids = None
         self.bank_weight = "weight"
@@ -641,8 +653,7 @@ class ExpertSlotPack:
         if cache.filled:
             self._n = cache.filled
         self.decode_misses = cache.stat_miss_host
-        if not self.use_l2:
-            self.file_misses = cache.stat_miss_host
+        self.file_misses = cache.stat_miss_host
 
     @property
     def filled(self) -> int:
@@ -725,8 +736,7 @@ class ExpertSlotPack:
             self.l1_hits += 1
         elif n > 0:
             self.decode_misses += n
-            if not self.use_l2:
-                self.file_misses += n
+            self.file_misses += n
         self._ready_slot_ids = slot_ids
         self._maybe_refresh_pins()
         return slot_ids
@@ -741,7 +751,7 @@ class ExpertSlotPack:
             si = self._ready_slot_ids
             self._ready_slot_ids = None
             self._layer_hit = False
-            return self._gather(x, si)
+            return self._gather(x, _as_routing(si, indices))
         n_ids = 1
         for s in indices.shape:
             n_ids *= int(s)
@@ -751,7 +761,7 @@ class ExpertSlotPack:
             return self._temp_gather(x, indices, ids, unique, pin=True)
         si = self.prepare_decode(indices)
         self._ready_slot_ids = None
-        return self._gather(x, si)
+        return self._gather(x, _as_routing(si, indices))
 
     def _prefill(self, x, indices, sorted_indices=False):
         self.prefill_calls += 1
@@ -776,21 +786,65 @@ class ExpertSlotPack:
         for key in self._keys.values():
             self._store.prefetch(key, experts)
 
+    def _stack_kind(self, kind: str, unique):
+        """Stack one bank's rows for a set of experts, reading them in parallel.
+
+        Prefill knows every expert it needs up front, so the rows can be pulled
+        with threaded `pread` instead of advised and then faulted one at a time.
+        `MADV_WILLNEED` measured 63.8% of prefill against 11.7% for the reads it
+        was hinting -- the same defect already removed from the decode path.
+        Returns None when there is no file-backed store, so the caller falls
+        back to the in-memory path.
+        """
+        import mlx.core as mx
+
+        store = self._store
+        key = self._keys.get(kind) if self._keys else None
+        if store is None or key is None:
+            return None
+        spec = store.row_spec(key)
+        if spec is None or spec[0] is None:
+            return None
+        dt, shape = spec
+        from slotbank.offload_cache import _parallel_reads, _pool
+
+        workers = _parallel_reads()
+        if workers and len(unique) > 1:
+            bufs = list(_pool(workers).map(lambda e: store.pread_row(key, e), unique))
+        else:
+            bufs = [store.pread_row(key, e) for e in unique]
+        if any(b is None for b in bufs):
+            return None
+        return mx.stack([
+            mx.array(memoryview(b)).view(getattr(mx, dt)).reshape(shape)
+            for b in bufs
+        ])
+
     def _temp_gather(self, x, indices, ids, unique, pin: bool, sorted_indices=False):
         # Prefill: throwaway pack, do not pin the decode LRU.
         import mlx.core as mx
 
         if self.use_waves and sorted_indices and not pin and len(unique) > self.capacity:
             return self._wave_gather(x, ids, unique)
-        self._prefetch(unique)
-        w = mx.stack([self._detach("weight", e) for e in unique])
+        w = self._stack_kind("weight", unique)
+        threaded = w is not None
+        if not threaded:
+            # no file-backed store: advise, then take the faults
+            self._prefetch(unique)
+            w = mx.stack([self._detach("weight", e) for e in unique])
         scales = qbiases = bias = None
         if self.quantized:
-            scales = mx.stack([self._detach("scales", e) for e in unique])
+            scales = (self._stack_kind("scales", unique) if threaded else None)
+            if scales is None:
+                scales = mx.stack([self._detach("scales", e) for e in unique])
             if self._has("biases"):
-                qbiases = mx.stack([self._detach("biases", e) for e in unique])
+                qbiases = (self._stack_kind("biases", unique) if threaded else None)
+                if qbiases is None:
+                    qbiases = mx.stack([self._detach("biases", e) for e in unique])
         if self._has("bias"):
-            bias = mx.stack([self._detach("bias", e) for e in unique])
+            bias = (self._stack_kind("bias", unique) if threaded else None)
+            if bias is None:
+                bias = mx.stack([self._detach("bias", e) for e in unique])
         mx.eval(*[t for t in (w, scales, qbiases, bias) if t is not None])
         inv = {e: i for i, e in enumerate(unique)}
         si = mx.array([inv[e] for e in ids], dtype=mx.int32).reshape(indices.shape)
@@ -859,49 +913,7 @@ class ExpertSlotPack:
         mx.eval(sl)
         return sl
 
-    def prefetch(self, experts) -> None:
-        """Fault routed experts into L2 before gather. No-op if L2 is off."""
-        if not self.use_l2:
-            return
-        tensors = []
-        for e in experts:
-            row, _hit = self._l2_ensure(int(e))
-            if row is None:
-                continue
-            tensors.extend(v for v in row.values() if v is not None)
-        if not tensors:
-            return
-        import mlx.core as mx
-
-        eval_fn = getattr(mx, "async_eval", None) or mx.eval
-        eval_fn(*tensors)
-
-    def _l2_ensure(self, e: int) -> tuple[dict[str, object] | None, bool]:
-        # Never delete. If grow_l2 is False, new experts are not stored.
-        row = self._l2.get(e)
-        if row is not None:
-            return row, True
-        if not self.use_l2 or not self.grow_l2:
-            return None, False
-        row = {"weight": self._read_kind("weight", e)}
-        if self.quantized:
-            row["scales"] = self._read_kind("scales", e)
-            if self._has("biases"):
-                row["biases"] = self._read_kind("biases", e)
-        if self._has("bias"):
-            row["bias"] = self._read_kind("bias", e)
-        self._l2[e] = row
-        self.file_misses += 1
-        return row, False
-
     def _detach(self, kind: str, e: int):
-        if self.use_l2:
-            row, hit = self._l2_ensure(e)
-            if row is not None:
-                if hit and kind == "weight":
-                    self.l2_hits += 1
-                return row[kind]
-            self.file_misses += 1
         return self._read_kind(kind, e)
 
     def _maybe_refresh_pins(self) -> None:
@@ -960,14 +972,7 @@ class ExpertSlotPack:
             self._last[s] = self._tick
             return s
         self.decode_misses += 1
-        if self.use_l2:
-            _row, l2_hit = self._l2_ensure(e)
-            if l2_hit:
-                self.l2_hits += 1
-            elif _row is None:
-                self.file_misses += 1
-        else:
-            self.file_misses += 1
+        self.file_misses += 1
         if self._n < self.capacity:
             s = self._n
             self._n += 1

@@ -8,7 +8,6 @@ from slotbank.expert_slots import (
     DEFAULT_CAPACITY,
     _capacity_from_model,
     install_expert_slots,
-    set_l2_growth,
     slot_stats,
     wrap_switch,
 )
@@ -164,8 +163,6 @@ def test_prefill_does_not_saturate_decode_lru():
     y = qsl(x_pre, idx_pre)
     mx.eval(y)
     pack = qsl._expert_slots
-    assert pack.use_l2 is False
-    assert pack.grow_l2 is True
     assert pack.filled == 0, "prefill must not pin the decode LRU"
     assert pack.prefill_calls == 1
     assert pack.decode_misses == 0
@@ -181,30 +178,6 @@ def test_prefill_does_not_saturate_decode_lru():
     assert pack.filled == 2
     assert pack.decode_misses == 2
 
-
-def test_l1_evict_refills_from_l2_not_file():
-    _require_mlx()
-    import mlx.core as mx
-    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
-
-    inn, out, e = 64, 64, 8
-    qsl = QuantizedSwitchLinear(inn, out, e, bias=False, group_size=64, bits=4)
-    wrap_switch(qsl, capacity=2, l2=True)
-    pack = qsl._expert_slots
-    x = mx.random.normal((1, 1, 1, inn))
-    qsl(x, mx.array([[0, 1]], dtype=mx.int32))
-    mx.eval(x)
-    files = pack.file_misses
-    assert files == 2
-    qsl(x, mx.array([[2, 3]], dtype=mx.int32))
-    mx.eval(x)
-    assert pack.file_misses == files + 2
-    assert pack.filled == 2
-    qsl(x, mx.array([[0, 1]], dtype=mx.int32))
-    mx.eval(x)
-    assert pack.file_misses == files + 2
-    assert pack.l2_hits >= 2
-    assert len(pack._l2) == 4
 
 
 def test_switch_glu_shared_layer_pin():
@@ -247,45 +220,9 @@ def test_install_wraps_quantized_switch_and_dense_name_misses():
     assert n >= 1
     stats = slot_stats(bag)
     assert stats["wrapped"] == n
-    assert bag.switch_mlp.gate_proj._expert_slots.use_l2 is False
     assert install_expert_slots(bag, capacity=2) == 0
 
 
-def test_l2_stops_growing_does_not_delete():
-    _require_mlx()
-    import mlx.core as mx
-    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
-
-    qsl = QuantizedSwitchLinear(64, 64, 8, bias=False, group_size=64, bits=4)
-    wrap_switch(qsl, capacity=2, l2=True)
-    pack = qsl._expert_slots
-    x = mx.random.normal((1, 1, 1, 64))
-    y = qsl(x, mx.array([[0, 1]], dtype=mx.int32))
-    mx.eval(y)
-    assert set(pack._l2) == {0, 1}
-    pack.grow_l2 = False
-    files = pack.file_misses
-    y = qsl(x, mx.array([[2, 3]], dtype=mx.int32))
-    mx.eval(y)
-    assert set(pack._l2) == {0, 1}
-    assert pack.file_misses > files
-    pack.grow_l2 = True
-    y = qsl(x, mx.array([[4, 5]], dtype=mx.int32))
-    mx.eval(y)
-    assert {0, 1, 4, 5} <= set(pack._l2)
-
-
-def test_set_l2_growth_walks_wrapped_modules():
-    _require_mlx()
-    from mlx_lm.models.switch_layers import QuantizedSwitchLinear, SwitchGLU
-
-    glu = SwitchGLU(64, 64, 4, bias=False)
-    glu.gate_proj = QuantizedSwitchLinear(64, 64, 4, bias=False, group_size=64, bits=4)
-    install_expert_slots(glu, capacity=2)
-    assert set_l2_growth(glu, False) >= 1
-    assert glu.gate_proj._expert_slots.grow_l2 is False
-    assert set_l2_growth(glu, True) >= 1
-    assert glu.gate_proj._expert_slots.grow_l2 is True
 
 
 def test_freq_pin_skips_hot_expert():
@@ -294,7 +231,7 @@ def test_freq_pin_skips_hot_expert():
     from mlx_lm.models.switch_layers import QuantizedSwitchLinear
 
     qsl = QuantizedSwitchLinear(64, 64, 8, bias=False, group_size=64, bits=4)
-    wrap_switch(qsl, capacity=2, l2=True, pin_after=1)
+    wrap_switch(qsl, capacity=2, pin_after=1)
     pack = qsl._expert_slots
     x = mx.random.normal((1, 1, 1, 64))
     y = qsl(x, mx.array([[0, 1]], dtype=mx.int32))
@@ -304,7 +241,6 @@ def test_freq_pin_skips_hot_expert():
     assert 0 in pack._pinned or 1 in pack._pinned
     y = qsl(x, mx.array([[2, 3]], dtype=mx.int32))
     mx.eval(y)
-    assert 0 in pack._l2 and 1 in pack._l2
 
 
 def test_decode_does_not_tolist_routing_ids():
@@ -363,3 +299,68 @@ def test_offload_cache_residency_marks_hot_pack():
     assert hot.allocated_size > 0 or hot.wired_limit >= 0
     assert qsl._expert_slots.cache.hot_bytes() > 0
     assert qsl._expert_slots.cache.last_n_miss >= 0
+
+
+def test_hot_profile_key_follows_the_symlink(tmp_path):
+    """Two spellings of one checkpoint must share a profile.
+
+    Models are commonly reached through a symlink into the Hugging Face cache.
+    Keying on the path string gave the link and its target different profiles,
+    so warming silently did nothing and reported success.
+    """
+    from slotbank.expert_slots import _profile_path
+
+    real = tmp_path / "snapshot"
+    real.mkdir()
+    link = tmp_path / "alias"
+    link.symlink_to(real)
+
+    assert _profile_path(str(link)) == _profile_path(str(real))
+    assert _profile_path(str(real) + "/") == _profile_path(str(real))
+    assert _profile_path(None) is None
+    assert _profile_path("") is None
+
+
+def test_prefill_threaded_rows_match_the_mmap_path(tmp_path):
+    """Prefill's parallel reads must produce exactly the mmap path's bytes.
+
+    Prefill computes the prompt's KV, so a wrong row here corrupts everything
+    downstream rather than degrading it. `MADV_WILLNEED` was 63.8% of prefill
+    against 11.7% for the reads it hinted; replacing it with threaded `pread`
+    measured ~2.2x, but only matters if the bytes are identical.
+    """
+    _require_mlx()
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+
+    from slotbank.expert_slots import SliceStore
+
+    inn, out, e = 128, 128, 32
+    qsl = QuantizedSwitchLinear(inn, out, e, bias=False, group_size=64, bits=4)
+    mx.eval(qsl.weight, qsl.scales, qsl.biases)
+    path = str(tmp_path / "prefill_rows.safetensors")
+    mx.save_safetensors(
+        path, {"weight": qsl.weight, "scales": qsl.scales, "biases": qsl.biases}
+    )
+    loaded = mx.load(path)
+    tiny = nn.Module()
+    tiny.weight, tiny.scales, tiny.biases = (
+        loaded["weight"], loaded["scales"], loaded["biases"])
+    tiny.group_size, tiny.bits, tiny.mode = 64, 4, "affine"
+    store = SliceStore.from_file(path)
+    pack = wrap_switch(tiny, capacity=8, store=store, keys=store.prefix_keys(""))
+
+    unique = [7, 0, 31, 12, 3]
+    for kind in ("weight", "scales", "biases"):
+        threaded = pack._stack_kind(kind, unique)
+        assert threaded is not None, f"{kind}: store-backed path should engage"
+        serial = mx.stack([pack._detach(kind, i) for i in unique])
+        mx.eval(threaded, serial)
+        assert threaded.dtype == serial.dtype
+        assert threaded.shape == serial.shape
+        assert mx.array_equal(threaded, serial), f"{kind} rows differ"
+
+    # no store -> None, so the caller keeps its in-memory fallback
+    pack._store = None
+    assert pack._stack_kind("weight", unique) is None

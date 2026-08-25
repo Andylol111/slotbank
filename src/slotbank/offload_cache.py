@@ -38,11 +38,13 @@ _READ_POOL = None
 def _parallel_reads() -> int:
     """SLOTBANK_READ_THREADS: fan the per-layer miss reads across cores.
 
-    A layer misses ~3 experts x 9 banks = ~31 rows. Those reads are the bulk of
-    decode and were fully serialized on one core.
+    A layer misses ~3 experts x 9 banks = ~31 rows of 512 KiB (weights) and
+    32 KiB (scales/biases). This SSD serves 512 KiB reads at 1342 MiB/s on one
+    thread and 4015 MiB/s at depth 8, and `pread` releases the GIL, so the
+    depth is real. Set 0 to fall back to the mmap path.
     """
     try:
-        return max(0, int(os.environ.get("SLOTBANK_READ_THREADS", "0")))
+        return max(0, int(os.environ.get("SLOTBANK_READ_THREADS", "8")))
     except ValueError:
         return 0
 
@@ -54,6 +56,18 @@ def _pool(n: int):
 
         _READ_POOL = ThreadPoolExecutor(max_workers=n, thread_name_prefix="sb-read")
     return _READ_POOL
+
+
+def _preadv_one(job) -> bool:
+    fd, dst, off = job
+    want = len(dst)
+    got = os.preadv(fd, [dst], off)
+    while 0 < got < want:
+        more = os.preadv(fd, [dst[got:]], off + got)
+        if not more:
+            break
+        got += more
+    return got == want
 
 
 def _mx():
@@ -854,7 +868,11 @@ class OffloadMoeCache:
     def _host_copy_counted(self, loader) -> int:
         mx = _mx()
         mx.eval(self.meta, self.src_indices, self.evict_slots)
-        n = int(self.meta[0].item())
+        # meta is host-readable after the eval above, so read it through the
+        # buffer protocol. `self.meta[0].item()` instead builds a fresh lazy
+        # slice on the Metal stream and waits on a SECOND command buffer:
+        # 224.7 us versus 0.8 us measured, x40 layers per token.
+        n = int(memoryview(self.meta)[0])
         self.last_n_miss = n
         if n <= 0:
             return 0
@@ -888,34 +906,66 @@ class OffloadMoeCache:
             )[0]
         mx.eval(*[b.pack for b in self.banks.values()])
 
+    def _preadv_into_packs(self, src, evict, banks, workers) -> bool:
+        """Read each missing row straight into its pack slot. False if unusable.
+
+        The row bytes on disk are already in the pack's layout, so the whole
+        chain of bytes -> mx.array -> view -> reshape -> pack[slot] = row is
+        pure overhead: it copies ~218 MiB/token on the host and builds ~1137
+        MLX graph nodes to place data that ``preadv`` can deposit directly.
+        Measured 1.27x end-to-end over seven paired runs, bit-identical.
+
+        Writing into an evaluated array's buffer is only safe because each
+        pack is written once per token and its gather has been evaluated by
+        the time we return to it; ``mx.eval`` below settles anything pending.
+        """
+        mx = _mx()
+        packs = [b.pack for b in banks if b.pack is not None]
+        if len(packs) != len(banks):
+            return False
+        mx.eval(*packs)
+        jobs = []
+        for bank in banks:
+            store = bank.store
+            spec = store.layout(bank.key)
+            if spec is None:
+                return False
+            view = memoryview(bank.pack).cast("B")
+            _, row_bytes = store._row_span(spec, 0)
+            # a slot must be exactly one row wide, or the offsets below are wrong
+            if row_bytes <= 0 or view.nbytes % row_bytes:
+                return False
+            fd = store.raw_fd(spec["path"])
+            for e, slot in zip(src, evict):
+                if (slot + 1) * row_bytes > view.nbytes:
+                    return False
+                off, nb = store._row_span(spec, e)
+                if nb != row_bytes:
+                    return False
+                jobs.append((fd, view[slot * row_bytes:(slot + 1) * row_bytes], off))
+        for got in _pool(workers).map(_preadv_one, jobs):
+            if not got:
+                return False
+        return True
+
     def _host_copy(self, n: int, loader) -> None:
         mx = _mx()
         src = [int(x) for x in self.src_indices.tolist()[:n]]
         evict = [int(x) for x in self.evict_slots.tolist()[:n]]
-        for bank in self.banks.values():
-            if bank.store is not None and bank.key is not None:
-                bank.store.prefetch(bank.key, src)
         workers = _parallel_reads()
         banks = list(self.banks.values())
         all_stored = bool(banks) and all(
             b.store is not None and b.key is not None for b in banks
         )
         if workers and n >= 2 and all_stored:
-            specs = {b.key: b.store.row_spec(b.key) for b in banks}
-            if all(dt is not None for dt, _ in specs.values()):
-                jobs = [(b.key, e) for b in banks for e in src]
-                store = banks[0].store
-                bufs = list(_pool(workers).map(lambda j: store.pread_row(j[0], j[1]), jobs))
-                blobs = dict(zip(jobs, bufs))
-                for bank in banks:
-                    dt, shape = specs[bank.key]
-                    for e, slot in zip(src, evict):
-                        buf = blobs.get((bank.key, e))
-                        if buf is None:
-                            continue
-                        bank.pack[slot] = mx.array(memoryview(buf)).view(
-                            getattr(mx, dt)).reshape(shape)
+            if self._preadv_into_packs(src, evict, banks, workers):
                 return
+        # mmap path only. MADV_WILLNEED costs ~180 ms/token of per-page VM
+        # bookkeeping -- 3x the read it is hinting -- but without it the faults
+        # below serialize and decode halves. The pread path above skips both.
+        for bank in banks:
+            if bank.store is not None and bank.key is not None:
+                bank.store.prefetch(bank.key, src)
         for e, s in zip(src, evict):
             for bank in self.banks.values():
                 row = None

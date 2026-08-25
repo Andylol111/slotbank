@@ -70,6 +70,49 @@ def stored_bytes_from_files(model_path: str) -> int:
     return total
 
 
+_EXPERT_MARKERS = (".switch_mlp.", ".experts.", ".block_sparse_moe.experts.")
+
+
+def expert_frac_from_files(model_path: str) -> float | None:
+    """Share of weight bytes that live in routed experts, read from the index.
+
+    The policy defaults to 0.8; this model measures 0.889, and the gap moves a
+    budget calculation by ~1.7 GiB. Reading the safetensors headers costs one
+    small read per shard and makes the memory card exact instead of assumed.
+    """
+    root = Path(model_path)
+    index = root / "model.safetensors.index.json"
+    if not index.is_file():
+        return None
+    try:
+        weight_map = json.loads(index.read_text())["weight_map"]
+    except (OSError, ValueError, KeyError):
+        return None
+    headers: dict[str, dict] = {}
+    expert = total = 0
+    for key, shard in weight_map.items():
+        path = os.path.realpath(root / shard)
+        head = headers.get(path)
+        if head is None:
+            try:
+                with open(path, "rb") as fh:
+                    n = int.from_bytes(fh.read(8), "little")
+                    head = headers[path] = json.loads(fh.read(n))
+            except (OSError, ValueError):
+                return None
+        meta = head.get(key)
+        if not isinstance(meta, dict) or "data_offsets" not in meta:
+            continue
+        lo, hi = meta["data_offsets"]
+        size = int(hi) - int(lo)
+        total += size
+        if any(m in key for m in _EXPERT_MARKERS):
+            expert += size
+    if total <= 0:
+        return None
+    return expert / total
+
+
 def _params_from_stored(stored: int, bits: float, group_size: int = 64) -> int:
     """Invert quantized_bytes: bytes-per-param is bits/8 plus scale overhead."""
     per = bits / 8.0 + (0.0 if bits >= 16 else 2.0 / group_size)
@@ -125,13 +168,44 @@ def estimate_card(args: Any):
         raise ValueError("cannot estimate model memory card; refuse to load blind")
     if kind is None:
         kind = "moe" if n_e > 0 and top_k > 0 else "dense"
+    frac = expert_frac_from_files(path) if kind == "moe" else None
+    kwargs = {} if frac is None else {"expert_param_frac": float(frac)}
     return model_memory_card(
         int(n),
         float(bits),
         kind=kind,
         n_routed_experts=n_e,
         top_k=top_k,
+        **kwargs,
     )
+
+
+_RECURRENT_KEYS = (
+    "linear_conv_kernel_dim", "linear_key_head_dim", "linear_num_key_heads",
+    "mamba_d_conv", "ssm_state_size", "conv_kernel",
+)
+
+
+def hybrid_from_config(cfg: dict[str, Any]) -> str | None:
+    """Detect recurrent/linear-attention layers from config alone.
+
+    These models keep a running state that cannot be rolled back, which makes
+    speculative decoding silently wrong. Detected without loading weights so
+    ``admit`` stays cheap.
+    """
+    t = cfg.get("text_config") or cfg
+    types = t.get("layer_types")
+    if isinstance(types, list):
+        kinds = {str(x) for x in types}
+        odd = {k for k in kinds if "linear" in k or "mamba" in k or "recurrent" in k}
+        if odd and len(kinds) > 1:
+            return "mixed layer_types: " + ", ".join(sorted(kinds))
+    if t.get("full_attention_interval"):
+        return f"full_attention_interval={t['full_attention_interval']} (most layers recurrent)"
+    hits = [k for k in _RECURRENT_KEYS if t.get(k)]
+    if hits:
+        return "recurrent config keys: " + ", ".join(hits)
+    return None
 
 
 def check_draft_compatible(model_path: str, draft_path: str) -> str | None:

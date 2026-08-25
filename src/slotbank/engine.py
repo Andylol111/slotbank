@@ -20,7 +20,8 @@ class Job:
 
 
 class Engine:
-    def __init__(self, model_path: str, *, leave_free: int | None = None):
+    def __init__(self, model_path: str, *, leave_free: int | None = None,
+                 progress=None):
         from slotbank.runtime import Runtime
         from slotbank.um import UmManager
 
@@ -37,6 +38,7 @@ class Engine:
         # thread that created them, so loading on the main thread and
         # generating on this one fails with "no Stream(cpu, 0) in current
         # thread". This is also what "the Metal thread is exclusive" implies.
+        self._progress = progress
         self._ready = threading.Event()
         self._load_error: str | None = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -117,7 +119,7 @@ class Engine:
 
     def _loop(self) -> None:
         try:
-            self.runtime.load()
+            self.runtime.load(progress=self._progress)
         except Exception as exc:               # surface load failures to __init__
             self._load_error = f"{type(exc).__name__}: {exc}"
             self._ready.set()

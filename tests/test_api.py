@@ -100,3 +100,91 @@ def test_chat_stream_done():
     assert r.status_code == 200
     assert "data: [DONE]" in r.text
     assert "chat.completion.chunk" in r.text
+
+
+def test_quiet_status_accepts_the_same_call_shape():
+    """--quiet must not change the emitter's signature.
+
+    The suppressed emitter is a stub; when its parameter names drifted from the
+    live one, every --quiet run crashed with TypeError at the final stats line
+    while ordinary runs passed.
+    """
+    from slotbank.cli import _status
+
+    for quiet in (True, False):
+        say = _status(quiet)
+        say()
+        say("progress")
+        say("final", end=True)
+
+
+def test_cli_reports_a_missing_model_without_a_traceback(capsys):
+    """A missing model is an ordinary outcome and should read as one."""
+    from slotbank.cli import main
+
+    code = main(["admit", "--model", "/nonexistent/model/path"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("slotbank: ")
+    assert "Traceback" not in err
+
+
+def test_effort_presets_apply_and_flags_still_win(monkeypatch, request):
+    """A preset sets defaults; an explicit flag alongside it must still win.
+
+    Precedence is flag > preset > environment, so a preset is a starting point
+    rather than a lock. Verified here because a preset that silently overrode
+    an explicit flag would be worse than having no presets at all.
+    """
+    from types import SimpleNamespace
+
+    from slotbank.cli import EFFORT, _apply_tuning
+
+    # _apply_tuning writes os.environ directly, which monkeypatch cannot undo,
+    # so snapshot and restore explicitly or the settings leak into other tests
+    import os
+
+    touched = ("SLOTBANK_BUDGET_GIB", "SLOTBANK_WARM", "SLOTBANK_PREFILL_STEP",
+               "SLOTBANK_WARM_MIN_TOKENS", "SLOTBANK_READ_THREADS",
+               "SLOTBANK_SLOTS_OVERRIDE")
+    saved = {k: os.environ.get(k) for k in touched}
+    for k in touched:
+        os.environ.pop(k, None)
+    def restore():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    request.addfinalizer(restore)
+
+    base = dict(budget_gib=None, slots=None, read_threads=None,
+                prefill_step=None, warm_min_tokens=None, no_warm=False)
+
+    _apply_tuning(SimpleNamespace(effort="low", **base))
+    assert os.environ["SLOTBANK_BUDGET_GIB"] == EFFORT["low"]["SLOTBANK_BUDGET_GIB"]
+    assert os.environ["SLOTBANK_WARM"] == "0"
+
+    # an explicit flag alongside the preset overrides that one value only
+    _apply_tuning(SimpleNamespace(effort="low", **{**base, "budget_gib": 9.0}))
+    assert os.environ["SLOTBANK_BUDGET_GIB"] == "9.0"
+    assert os.environ["SLOTBANK_WARM"] == "0", "the rest of the preset should stand"
+
+    _apply_tuning(SimpleNamespace(effort="high", **base))
+    assert os.environ["SLOTBANK_PREFILL_STEP"] == "4096"
+    assert os.environ["SLOTBANK_WARM_MIN_TOKENS"] == "0"
+
+
+def test_high_effort_does_not_raise_slot_count():
+    """Guards a measured trap: more slots is slower when the bank does not fit.
+
+    C=32 measured 8.6 tok/s against C=64 at 6.5, because the extra pack comes
+    out of the page cache serving its own misses. A "high" preset that raised
+    the slot count would be slower than the default while looking faster.
+    """
+    from slotbank.cli import EFFORT
+
+    for name, preset in EFFORT.items():
+        assert "SLOTBANK_SLOTS_OVERRIDE" not in preset, name
+        assert "SLOTBANK_BUDGET_GIB" not in EFFORT["high"], \
+            "high must leave capacity to the policy, not force it up"
