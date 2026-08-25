@@ -40,9 +40,13 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | None) -> list[int]:
     msgs = normalize_messages(messages)
     apply = getattr(tokenizer, "apply_chat_template", None)
-    if apply is None:
+
+    def plain() -> list[int]:
         text = "\n".join(f"{m['role']}: {m.get('content') or ''}" for m in msgs)
         return list(tokenizer.encode(text))
+
+    if apply is None:
+        return plain()
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
@@ -54,6 +58,11 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     except TypeError:
         kwargs.pop("tools", None)
         ids = apply(msgs, **kwargs)
+    except ValueError:
+        # A base model ships the method but no template, and transformers
+        # raises rather than returning None. Without this, every base
+        # checkpoint 500s on /v1/chat/completions instead of falling back.
+        return plain()
     return [int(x) for x in ids]
 
 

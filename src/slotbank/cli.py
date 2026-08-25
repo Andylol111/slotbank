@@ -26,11 +26,36 @@ def main(argv: list[str] | None = None) -> int:
     _tuning_args(g)
 
     s = sub.add_parser("serve", help="Chat / Claude / Codex HTTP")
-    _model_args(s)
+    s.add_argument("--model", required=True,
+                   help="short name, repo id, or local folder")
+    s.add_argument("--leave-free", default=None, help="RAM to keep for macOS, e.g. 8g")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)
     s.add_argument("--api-key", default=None)
     _tuning_args(s)
+
+    r = sub.add_parser("run", help="chat with a model, keeping it loaded")
+    r.add_argument("model", help="short name, repo id, or local folder")
+    r.add_argument("prompt", nargs="*", help="one-shot prompt; omit for a chat session")
+    r.add_argument("--leave-free", default=None, help="RAM to keep for macOS, e.g. 8g")
+    r.add_argument("--max-tokens", type=int, default=1024)
+    r.add_argument("--temp", type=float, default=0.0)
+    r.add_argument("--top-p", type=float, default=1.0)
+    r.add_argument("--top-k", type=int, default=0)
+    r.add_argument("--quiet", action="store_true")
+    _tuning_args(r)
+
+    ls = sub.add_parser("list", help="cached models and what each would cost here")
+    ls.add_argument("--all", action="store_true", help="include non-MLX repos")
+
+    pl = sub.add_parser("pull", help="download a model, refusing one that cannot run")
+    pl.add_argument("model")
+    pl.add_argument("--revision", default="main")
+    pl.add_argument("--force", action="store_true", help="download even if it will not fit")
+
+    rm = sub.add_parser("rm", help="delete a cached model")
+    rm.add_argument("model")
+    rm.add_argument("-y", "--yes", action="store_true")
 
     c = sub.add_parser("check", help="inspect a remote model without downloading it")
     c.add_argument("repo", help="Hugging Face repo id, e.g. mlx-community/Qwen3.5-35B-A3B-4bit")
@@ -43,6 +68,14 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     _apply_tuning(args)
     try:
+        if args.cmd == "run":
+            return _run(args)
+        if args.cmd == "list":
+            return _list(args)
+        if args.cmd == "pull":
+            return _pull(args)
+        if args.cmd == "rm":
+            return _rm(args)
         if args.cmd == "check":
             return _check(args)
         if args.cmd == "admit":
@@ -244,10 +277,160 @@ def _serve(args) -> int:
 
     from slotbank.api.app import create_app
 
-    engine = Engine(args.model, leave_free=leave_free_arg(args.leave_free))
+    from slotbank.registry import local_path, resolve
+
+    repo = resolve(args.model)
+    path = local_path(repo)
+    if path is None:
+        sys.stderr.write(
+            f"slotbank: {repo} is not downloaded. Run: slotbank pull {args.model}\n")
+        return 2
+    _apply_tuning(args)
+    engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=repo)
     app = create_app(engine, api_key=args.api_key)
+    print(f"slotbank serving {repo} on http://{args.host}:{args.port}\n"
+          f"  OpenAI / Codex / OpenCode  "
+          f"OPENAI_BASE_URL=http://{args.host}:{args.port}/v1\n"
+          f"  Claude Code                "
+          f"ANTHROPIC_BASE_URL=http://{args.host}:{args.port}", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     engine.close()
+    return 0
+
+
+def _run(args) -> int:
+    """Chat with a model, loading it once.
+
+    The point of holding the session open is that load plus first prefill costs
+    ~19 s on a 19 GiB model. Paying that per message, as a one-shot CLI does,
+    dominates everything the runtime saves.
+    """
+    from slotbank.registry import local_path, resolve
+
+    repo = resolve(args.model)
+    # Engine reads the safetensors to build its memory card, so it needs the
+    # snapshot directory -- a bare repo id has no files to measure.
+    path = local_path(repo)
+    if path is None:
+        sys.stderr.write(
+            f"slotbank: {repo} is not downloaded. Run: slotbank pull {args.model}\n")
+        return 2
+
+    _apply_tuning(args)
+    say = _status(args.quiet)
+    t0 = time.perf_counter()
+    say("loading model...")
+    engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=repo)
+    sampling = SamplingParams(temperature=args.temp, top_p=args.top_p,
+                              top_k=args.top_k, max_tokens=args.max_tokens)
+    try:
+        say(f"loaded in {time.perf_counter() - t0:.1f}s{_memory_note(engine)}", end=True)
+
+        def answer(messages) -> str:
+            ids = engine.tokenize_chat(messages, None)
+            first = {"t": None, "n": 0}
+
+            def on_token(_tid, piece):
+                if first["t"] is None:
+                    first["t"] = time.perf_counter()
+                first["n"] += 1
+                sys.stdout.write(piece)
+                sys.stdout.flush()
+
+            start = time.perf_counter()
+            out = engine.generate(ids, sampling, on_token=on_token)
+            sys.stdout.write("\n")
+            if first["t"] and first["n"] > 1:
+                rate = (first["n"] - 1) / max(time.perf_counter() - first["t"], 1e-9)
+                say(f"{first['n']} tokens - {rate:.2f} tok/s decode - "
+                    f"first token {first['t'] - start:.1f}s", end=True)
+            return out.content
+
+        if args.prompt:
+            answer([{"role": "user", "content": " ".join(args.prompt)}])
+            return 0
+
+        history: list[dict] = []
+        say("chat session - /bye to exit, /clear to reset the context", end=True)
+        while True:
+            try:
+                line = input(">>> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                sys.stdout.write("\n")
+                return 0
+            if not line:
+                continue
+            if line in ("/bye", "/exit", "/quit"):
+                return 0
+            if line == "/clear":
+                history = []
+                say("context cleared", end=True)
+                continue
+            history.append({"role": "user", "content": line})
+            history.append({"role": "assistant", "content": answer(history)})
+    finally:
+        engine.close()
+
+
+def _list(args) -> int:
+    from slotbank.admit import expert_frac_from_files
+    from slotbank.registry import local_models
+
+    G = float(1 << 30)
+    models = local_models(mlx_only=not args.all)
+    if not models:
+        print("no models cached. Try: slotbank pull Qwen3.5-35B-A3B-4bit")
+        return 0
+    width = max([len(m.repo_id) for m in models] + [20]) + 2
+    print(f"{'MODEL':<{width}}{'SIZE':>10}{'EXPERTS':>10}")
+    for m in models:
+        try:
+            frac = expert_frac_from_files(m.path)
+        except Exception:
+            frac = None
+        tag = f"{frac:.0%}" if frac else "-"
+        print(f"{m.repo_id:<{width}}{m.size_bytes / G:>8.2f}G{tag:>10}")
+    total = sum(m.size_bytes for m in models)
+    print(f"\n{len(models)} models, {total / G:.1f} GiB on disk")
+    return 0
+
+
+def _pull(args) -> int:
+    """Download, but check first.
+
+    Pulling tens of GiB and only then discovering the resident floor does not
+    fit is the exact waste `check` exists to prevent, so pull runs it.
+    """
+    from slotbank.registry import local_path, pull, resolve
+
+    repo = resolve(args.model)
+    if local_path(repo):
+        print(f"{repo} is already downloaded")
+        return 0
+    if not args.force:
+        rc = _check(argparse.Namespace(
+            repo=repo, revision=args.revision, leave_free=None))
+        if rc != 0:
+            sys.stderr.write("\nslotbank: refusing to download. "
+                             "Use --force to download anyway.\n")
+            return rc
+        print()
+    print(f"downloading {repo} ...")
+    path = pull(repo, revision=args.revision)
+    print(f"done: {path}\nRun it with: slotbank run {args.model}")
+    return 0
+
+
+def _rm(args) -> int:
+    from slotbank.registry import remove, resolve
+
+    repo = resolve(args.model)
+    if not args.yes:
+        if input(f"delete {repo}? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("cancelled")
+            return 0
+    freed = remove(repo)
+    print(f"deleted {repo}, freed {freed / (1 << 30):.2f} GiB")
     return 0
 
 

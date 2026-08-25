@@ -21,7 +21,7 @@ class Job:
 
 class Engine:
     def __init__(self, model_path: str, *, leave_free: int | None = None,
-                 progress=None):
+                 progress=None, model_id: str | None = None):
         from slotbank.runtime import Runtime
         from slotbank.um import UmManager
 
@@ -32,7 +32,9 @@ class Engine:
         )
         self.um = UmManager.from_args(args)
         self.runtime = Runtime(args, um=self.um)
-        self.model_id = model_path.rstrip("/").rsplit("/", 1)[-1]
+        # An HF snapshot directory is named after the commit hash, so without
+        # an explicit name every client would list "23511b94..." as the model.
+        self.model_id = model_id or model_path.rstrip("/").rsplit("/", 1)[-1]
         self._jobs: queue.Queue[Job | None] = queue.Queue()
         # Load on the worker thread, not here. MLX arrays are bound to the
         # thread that created them, so loading on the main thread and
@@ -128,6 +130,14 @@ class Engine:
         while True:
             job = self._jobs.get()
             if job is None:
+                # Save here, not in close(). The slot-id arrays belong to this
+                # thread, so mx.eval on the caller's thread raises "no
+                # Stream(gpu, 1)" -- and close() runs in a finally, so that
+                # error replaces whatever really went wrong.
+                try:
+                    self.runtime.save_profile()
+                except Exception:
+                    pass
                 return
             try:
                 self._run_job(job)
