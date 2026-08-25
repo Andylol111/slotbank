@@ -11,8 +11,22 @@ from slotbank.types import SamplingParams
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="slotbank")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = argparse.ArgumentParser(
+        prog="slotbank",
+        description="Run MoE models whose expert bank does not fit in memory.",
+        epilog=(
+            "start here:\n"
+            "  slotbank list                     what is already downloaded\n"
+            "  slotbank check <model>            will it run here (no download)\n"
+            "  slotbank pull <model>             download it\n"
+            "  slotbank run <model>              chat with it\n"
+            "  slotbank serve --model <model>    serve it to Claude Code / Codex\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Not required: a bare `slotbank` should show what to do next, the way
+    # every other model runner does, not an argparse error.
+    sub = p.add_subparsers(dest="cmd")
 
     g = sub.add_parser("generate", help="one-shot completion")
     _model_args(g)
@@ -66,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     _model_args(a)
 
     args = p.parse_args(argv)
+    if not args.cmd:
+        p.print_help()
+        return 0
     _apply_tuning(args)
     try:
         if args.cmd == "run":
