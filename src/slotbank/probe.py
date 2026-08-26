@@ -137,3 +137,96 @@ def probe(repo: str, revision: str = "main", max_shards: int | None = None) -> R
         scanned_layers=scanned,
         model_type=str(pick("model_type", default="?")),
     )
+
+
+# --- family comparison: one probe pays for every quant, see cli-design.md s7 --
+
+import re as _re
+
+# Ordered longest-first so "4bit-DWQ" is not shortened to "4bit" before the tag
+# is stripped from the family stem.
+_QUANT = _re.compile(
+    r"[-_](?:"
+    r"(?P<bits>\d+(?:\.\d+)?)\s*bit(?:s)?(?:[-_][A-Za-z0-9]+)?"
+    r"|(?P<fp>mx?fp(?P<fpb>\d+))"
+    r"|bf16|fp16|f16"
+    r")$", _re.IGNORECASE)
+
+
+def quant_bits(repo: str) -> float | None:
+    """Bits per weight implied by a repo name, or None if it does not say."""
+    m = _QUANT.search(repo.split("/")[-1])
+    if not m:
+        return None
+    if m.group("bits"):
+        return float(m.group("bits"))
+    if m.group("fpb"):
+        return float(m.group("fpb"))
+    return 16.0
+
+
+def family_stem(repo: str) -> str:
+    """The repo name with its quant tag removed."""
+    name = repo.split("/")[-1]
+    m = _QUANT.search(name)
+    return name[: m.start()] if m else name
+
+
+def family(query: str, limit: int = 40) -> list[tuple[str, int, float]]:
+    """Sibling quants of `query`: (repo_id, total_bytes, bits), smallest first.
+
+    Sizes come from the Hub file listing, which costs one request per repo and
+    no download. Repos whose name does not state a quantisation are skipped --
+    the scaling in `scale` is defined by bits per weight, so a row without one
+    could not be derived honestly.
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    stem = family_stem(query).lower()
+    out: dict[str, tuple[str, int, float]] = {}
+    try:
+        hits = list(api.list_models(search=f"{family_stem(query)} mlx", limit=limit))
+    except Exception:
+        return []
+    for m in hits:
+        if family_stem(m.id).lower() != stem:
+            continue
+        bits = quant_bits(m.id)
+        if bits is None:
+            continue
+        try:
+            info = api.model_info(m.id, files_metadata=True)
+        except Exception:
+            continue
+        total = sum(int(f.size or 0) for f in (info.siblings or [])
+                    if f.rfilename.endswith(".safetensors"))
+        if total:
+            out[m.id] = (m.id, total, bits)
+    return sorted(out.values(), key=lambda r: r[1])
+
+
+def scale(card: RemoteCard, repo: str, total_bytes: int, bits: float) -> RemoteCard:
+    """A card for a sibling quant, derived from one probe plus its size.
+
+    Layers, expert count, top-k and the expert share are architecture: they do
+    not move when bits per weight do. Only byte totals scale. That assumption is
+    the whole trick and it is why derived rows are marked `est` on screen -- a
+    repo keeping embeddings or lm_head at higher precision tilts the expert
+    share, which moves the floor.
+    """
+    probed = quant_bits(card.repo)
+    ratio = (bits / probed) if probed else 1.0
+    return RemoteCard(
+        repo=repo,
+        total_bytes=int(total_bytes),
+        expert_bytes=int(total_bytes * card.expert_frac),
+        resident_bytes=int(total_bytes * (1.0 - card.expert_frac)),
+        num_experts=card.num_experts,
+        top_k=card.top_k,
+        layers=card.layers,
+        row_bytes=int(card.row_bytes * ratio),
+        shards=card.shards,
+        scanned_layers=card.scanned_layers,
+        model_type=card.model_type,
+    )

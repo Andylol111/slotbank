@@ -49,6 +49,28 @@ def _parallel_reads() -> int:
         return 0
 
 
+def _retain_reads() -> bool:
+    """SLOTBANK_RETAIN: touch pread-populated rows through the file mapping.
+
+    macOS drops `pread`-populated pages fast. Measured 2026-08-25, no model,
+    two shard rotations: a 0.75 GiB range read with `pread` was 0% resident
+    within 15-60 s with the fd open and 4.5 GiB reclaimable; holding an `mmap`
+    over it did not help (0% by 60 s). Only pages *faulted through* the mapping
+    stayed -- 92.7% and 96.0% resident at 180 s.
+
+    So the retention step is a soft-fault touch after the read, costing a
+    measured 95-148 ms per GiB touched (n=2). Off by default: the touch is
+    pure page-cache policy and changes no numerics, but its end-to-end
+    throughput effect is not yet established.
+    """
+    return os.environ.get("SLOTBANK_RETAIN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _pool(n: int):
     global _READ_POOL
     if _READ_POOL is None:
@@ -946,6 +968,16 @@ class OffloadMoeCache:
         for got in _pool(workers).map(_preadv_one, jobs):
             if not got:
                 return False
+        if _retain_reads():
+            # The rows are in the page cache right now but will not stay there.
+            # Touching them through the shard mapping moves them into that
+            # mapping's resident set, which is what actually survives. Soft
+            # faults only -- the bytes were just read, so no disk I/O here.
+            for bank in banks:
+                try:
+                    bank.store.warm(bank.key, src, advise=False)
+                except (OSError, ValueError):
+                    break
         return True
 
     def _host_copy(self, n: int, loader) -> None:

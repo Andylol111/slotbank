@@ -13,3 +13,18 @@ build/
 # conditions under which each should be revisited. Kept out of commits so the
 # history stays about code; it is working context, not a deliverable.
 docs/DECISIONS.md
+
+# Research and product working documents. Measured results, rejected
+# approaches, competitor analysis, roadmaps and design specs. Same reasoning as
+# DECISIONS.md above: working context, not a deliverable, and not something to
+# hand to anyone reading the public repo.
+ROADMAP.md
+docs/ane-prefill-plan.md
+docs/product-spec.md
+docs/spec-assessment.md
+docs/cli-design.md
+
+# Prototypes and throwaway measurement scripts.
+scratch/
+docs/tokps-theories.md
+docs/attempt-audit.md

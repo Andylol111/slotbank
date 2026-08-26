@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+
 from slotbank.types import GenerationStep, SamplingParams
 
 
@@ -75,6 +77,57 @@ def _load_model(model_path: str, kwargs: dict):
         "no installed loader could load this model:\n  "
         + "\n  ".join(errors)
     )
+
+
+def _kv_bits() -> int | None:
+    """SLOTBANK_KV_BITS: quantise the KV cache to 8 or 4 bits. Off by default.
+
+    The cache is 96 KiB per token on Qwen3-30B-A3B (48 layers x 4 kv heads x
+    128 head dim x 2 for K and V x 2 bytes), so it -- not the model -- sets the
+    ceiling on context. Measured on that model over 1024 tokens of real text:
+
+        bits   KiB/token   K rel err   attention top-1 preserved
+        fp16        96.0           -                      100.0%
+        8-bit       51.0      0.0138                       96.9%
+        4-bit       27.0      0.1462                       78.1%
+
+    8-bit is the supported setting. 4-bit is accepted but not recommended: mlx
+    groups scales along head_dim, and K's outliers sit in a fixed channel
+    (measured: the same channel is the largest for 93.6% of tokens), so a
+    per-token group takes 3.5x the error a per-channel group would. That is a
+    deliberate mlx trade -- per-channel groups span 64 tokens and cannot be
+    formed one token at a time -- not a defect, and fixing it needs a KIVI-style
+    fp16 residual buffer.
+    """
+    import os
+
+    raw = os.environ.get("SLOTBANK_KV_BITS", "").strip()
+    if not raw:
+        return None
+    try:
+        bits = int(raw)
+    except ValueError:
+        return None
+    return bits if bits in (4, 8) else None
+
+
+def _kv_quant_start() -> int:
+    """SLOTBANK_KV_START: context length past which the cache is quantised.
+
+    Conversion is one-way and whole-cache, so short chats are left exact: the
+    cache is only ~16% of the bytes read per token at 8k context, and all of the
+    quality cost lands on long-context retrieval, which is where the memory is
+    needed anyway.
+    """
+    import os
+
+    raw = os.environ.get("SLOTBANK_KV_START", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 4096
 
 
 def _prefill_step(default: int) -> int:
@@ -284,7 +337,18 @@ class Runtime:
         self._spec_ok = None
         self._warmed = 0
         self._total_generated = 0
-        self._prefix = None if _prefix_disabled() else PrefixCache()
+        # ponytail: PrefixCache stores states via _copy_state, which copies one
+        # level deep -- a QuantizedKVCache's nested (w, scales, biases) tuples
+        # would be aliased to the live cache, not copied. Cross-request prefix
+        # sharing is therefore off when quantising. Within-session reuse is
+        # unaffected: that path keeps self._cache and never round-trips state.
+        # Upgrade path: teach _copy_state/_state_bytes to recurse and have
+        # restore() rebuild the entry with the saved cache class.
+        self._kv_bits = _kv_bits()
+        self._prefix = (
+            None if (_prefix_disabled() or self._kv_bits is not None)
+            else PrefixCache()
+        )
         self._wired = 0
 
     @property
@@ -536,7 +600,26 @@ class Runtime:
                 self._prefix.put(ids[:prefix_n], self._cache)
             except (ValueError, TypeError, RuntimeError):
                 pass
+        self._quantize_kv()
         self._last_token = ids[-1]
+
+    def _quantize_kv(self) -> None:
+        """Convert the KV cache to `SLOTBANK_KV_BITS` once it passes the start.
+
+        mlx-lm's helper swaps each entry for a QuantizedKVCache in place. The
+        swap is one-way and the replacement has no `to_quantized`, so repeat
+        calls are a cheap hasattr check rather than repeated work.
+        """
+        if self._kv_bits is None or not self._cache:
+            return
+        from mlx_lm.generate import maybe_quantize_kv_cache
+
+        maybe_quantize_kv_cache(
+            self._cache,
+            quantized_kv_start=_kv_quant_start(),
+            kv_group_size=64,
+            kv_bits=self._kv_bits,
+        )
 
     def _snap_points(self, start: int, prefix_n: int) -> set:
         """Block boundaries to stop prefill on so the state can be cached.
@@ -646,6 +729,7 @@ class Runtime:
         Used by both the one-token path and the speculative path, so a token
         emitted either way is accounted identically.
         """
+        self._quantize_kv()
         import mlx.core as mx
 
         self._generated.append(token_id)
@@ -680,13 +764,19 @@ class Runtime:
         import mlx.core as mx
 
         self.save_profile()
-        mx.clear_cache()
+        # Drop every reference first. Clearing the cache while the model is
+        # still referenced frees nothing, and the buffers then land back in
+        # MLX's allocator cache as they are released -- measured at 1.09 GiB
+        # retained per unloaded model, which is exactly what makes an idle
+        # unload useless in a multi-model process.
         self._model = None
         self._tokenizer = None
         self._cache = None
         self._fed_ids = []
         self._pending = []
         self._logprobs = None
+        gc.collect()
+        mx.clear_cache()
 
     def _match_stop(self) -> str | None:
         stops = (self._sampling_params.stop_strs if self._sampling_params else None) or []

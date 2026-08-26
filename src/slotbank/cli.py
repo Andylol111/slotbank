@@ -59,6 +59,25 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--quiet", action="store_true")
     _tuning_args(r)
 
+    u = sub.add_parser("use", help="set which model answers as a role")
+    u.add_argument("role", nargs="?", help="e.g. chat, reasoning")
+    u.add_argument("model", nargs="?", help="short name or repo id")
+    u.add_argument("--effort", choices=sorted(EFFORT), default=None)
+
+    cm = sub.add_parser("compare", help="compare every quant of a model, one probe")
+    cm.add_argument("model")
+    cm.add_argument("--revision", default="main")
+    cm.add_argument("--leave-free", default=None)
+    cm.add_argument("--ram", default=None, help="model a machine you do not own")
+
+    ch = sub.add_parser("chat", help="interactive session (same as bare slotbank)")
+    ch.add_argument("model", nargs="?")
+    ch.add_argument("--leave-free", default=None)
+
+    sr = sub.add_parser("search", help="find models on the Hub by name")
+    sr.add_argument("query", nargs="+")
+    sr.add_argument("--limit", type=int, default=12)
+
     ls = sub.add_parser("list", help="cached models and what each would cost here")
     ls.add_argument("--all", action="store_true", help="include non-MLX repos")
 
@@ -66,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("model")
     pl.add_argument("--revision", default="main")
     pl.add_argument("--force", action="store_true", help="download even if it will not fit")
+    pl.add_argument("--quiet", action="store_true",
+                    help="suppress the progress region on stderr")
 
     rm = sub.add_parser("rm", help="delete a cached model")
     rm.add_argument("model")
@@ -75,18 +96,35 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("repo", help="Hugging Face repo id, e.g. mlx-community/Qwen3.5-35B-A3B-4bit")
     c.add_argument("--revision", default="main")
     c.add_argument("--leave-free", default=None, help="RAM to keep for macOS, e.g. 8g")
+    c.add_argument("--ram", default=None,
+                   help="model a machine you do not own, e.g. 128g")
 
     a = sub.add_parser("admit", help="print the memory card and refuse if it does not fit")
     _model_args(a)
 
     args = p.parse_args(argv)
     if not args.cmd:
-        p.print_help()
-        return 0
+        # A bare `slotbank` enters the interactive shell when there is a
+        # terminal to drive it; piping still gets the plain command listing.
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            from slotbank.shell import Shell
+
+            return Shell().run()
+        return _home(p)
     _apply_tuning(args)
     try:
         if args.cmd == "run":
             return _run(args)
+        if args.cmd == "chat":
+            from slotbank.shell import Shell
+
+            return Shell(args.model, leave_free_arg(args.leave_free)).run()
+        if args.cmd == "use":
+            return _use(args)
+        if args.cmd == "compare":
+            return _compare(args)
+        if args.cmd == "search":
+            return _search(args)
         if args.cmd == "list":
             return _list(args)
         if args.cmd == "pull":
@@ -399,26 +437,47 @@ def _list(args) -> int:
         print("no models cached. Try: slotbank pull Qwen3.5-35B-A3B-4bit")
         return 0
     width = max([len(m.repo_id) for m in models] + [20]) + 2
-    print(f"{'MODEL':<{width}}{'SIZE':>10}{'EXPERTS':>10}")
+    from slotbank.layout import detect_device_profile
+
+    budget = detect_device_profile(leave_free_bytes=None).max_working_set_bytes
+    rows = []
     for m in models:
         try:
             frac = expert_frac_from_files(m.path)
         except Exception:
             frac = None
-        tag = f"{frac:.0%}" if frac else "-"
-        print(f"{m.repo_id:<{width}}{m.size_bytes / G:>8.2f}G{tag:>10}")
+        state, wired = _role_state(m.repo_id, budget)
+        rows.append((m.repo_id.split("/")[-1], f"{m.size_bytes / G:.1f}G",
+                     f"{frac:.0%}" if frac else "-",
+                     f"{wired:.1f}G" if wired else "-", state))
+    try:
+        from slotbank import ui
+
+        if ui.bars_disabled():
+            raise ImportError
+        ui.model_table(rows)
+    except Exception:
+        print(f"{'MODEL':<{width}}{'SIZE':>10}{'EXPERTS':>10}")
+        for name, on_disk, tag, _w, _s in rows:
+            print(f"{name:<{width}}{on_disk:>10}{tag:>10}")
     total = sum(m.size_bytes for m in models)
     print(f"\n{len(models)} models, {total / G:.1f} GiB on disk")
     return 0
 
 
 def _pull(args) -> int:
-    """Download, but check first.
+    """Download, but check first, and never go silent while it runs.
 
     Pulling tens of GiB and only then discovering the resident floor does not
     fit is the exact waste `check` exists to prevent, so pull runs it.
+
+    The download itself then reports continuously. At 39.9 MiB/s a 132 GiB
+    checkpoint is 56 minutes and an 86 GiB one is 37; a CLI that prints one
+    line and goes quiet for that long is indistinguishable from a dead one, and
+    the only recovery the user has is Ctrl-C and start over.
     """
-    from slotbank.registry import local_path, pull, resolve
+    from slotbank import ui
+    from slotbank.registry import disk_free, local_path, pull, pull_plan, resolve
 
     repo = resolve(args.model)
     if local_path(repo):
@@ -426,15 +485,32 @@ def _pull(args) -> int:
         return 0
     if not args.force:
         rc = _check(argparse.Namespace(
-            repo=repo, revision=args.revision, leave_free=None))
+            repo=repo, revision=args.revision, leave_free=None, ram=None))
         if rc != 0:
             sys.stderr.write("\nslotbank: refusing to download. "
                              "Use --force to download anyway.\n")
             return rc
-        print()
-    print(f"downloading {repo} ...")
-    path = pull(repo, revision=args.revision)
-    print(f"done: {path}\nRun it with: slotbank run {args.model}")
+    quiet = getattr(args, "quiet", False)
+    try:
+        # The manifest costs ~0.3 s and buys the byte total, the file count and
+        # which files are already cached -- all three before anything moves.
+        plan = ui.Plan(pull_plan(repo, revision=args.revision,
+                                 tqdm_class=ui.hub_progress(lambda *_: None)))
+        if not quiet:
+            ui.pull_header(repo, plan, disk_free())
+        with ui.download_view(plan, quiet=quiet) as view:
+            path = pull(repo, revision=args.revision,
+                        tqdm_class=ui.hub_progress(view.on_bar))
+    except Exception as exc:
+        # A short name resolves by guessing a namespace, so a miss is common
+        # and "404" alone is a dead end. Offer the real repos instead.
+        sys.stderr.write(f"slotbank: cannot download {repo}: {exc}\n")
+        _suggest(args.model, repo)
+        return 2
+    if quiet:
+        print(f"done: {path}\nRun it with: slotbank run {args.model}")
+    else:
+        ui.download_done(path, plan, view, args.model)
     return 0
 
 
@@ -448,6 +524,241 @@ def _rm(args) -> int:
             return 0
     freed = remove(repo)
     print(f"deleted {repo}, freed {freed / (1 << 30):.2f} GiB")
+    return 0
+
+
+LEAVE_FOR_OS = 8 << 30      # what macOS and your apps need; see leave-free table
+
+
+def _suggest(query: str, tried: str) -> None:
+    """A short name resolves by guessing a namespace, so a miss is routine.
+    '404' alone is a dead end; print the real repos instead."""
+    from slotbank.registry import search
+
+    hits = [h for h in search(query) if h != tried]
+    if not hits:
+        return
+    sys.stderr.write("\ndid you mean:\n")
+    for h in hits[:6]:
+        sys.stderr.write(f"    {h}\n")
+
+
+def _home(parser) -> int:
+    """A bare `slotbank`. Falls back to argparse off a TTY or if Rich is absent,
+    so piping into a file or a script still yields plain parseable text."""
+    from slotbank.registry import local_models
+
+    try:
+        from slotbank import ui
+        from slotbank.layout import detect_device_profile
+
+        if ui.bars_disabled():
+            raise ImportError                    # honour the no-colour path
+        models = local_models()
+        prof = detect_device_profile(leave_free_bytes=None)
+        ui.home(prof.total_bytes, prof.max_working_set_bytes, len(models),
+                sum(m.size_bytes for m in models) / float(1 << 30))
+        return 0
+    except Exception:
+        parser.print_help()
+        return 0
+
+
+def _compare(args) -> int:
+    """Every quant of a model, from one probe.
+
+    Quants of a model are one architecture: layers, expert count, top-k and the
+    expert share do not change with bits per weight, and the Hub file listing
+    carries the byte totals for free. So the expensive half of `check` runs once
+    and every other row is derived -- and marked `est`, because a repo that
+    keeps embeddings at higher precision tilts that scaling.
+    """
+    from slotbank.layout import (MIN_KV_BYTES, detect_device_profile,
+                                 slot_capacity, slot_floor)
+    from slotbank.probe import family, probe, scale
+    from slotbank.registry import resolve
+
+    G = float(1 << 30)
+    target = resolve(args.model)
+    sibs = family(target)
+    if not sibs:
+        sys.stderr.write(f"slotbank: found no quantised siblings for {target}\n")
+        return 2
+
+    probed_repo = next((r for r, _, _ in sibs if r == target), sibs[len(sibs) // 2][0])
+    try:
+        card = probe(probed_repo, revision=args.revision)
+    except Exception as exc:
+        sys.stderr.write(f"slotbank: cannot inspect {probed_repo}: {exc}\n")
+        return 2
+
+    if args.ram:
+        total = leave_free_arg(args.ram)
+        budget = int(total * 0.74)
+    else:
+        p = detect_device_profile(leave_free_bytes=leave_free_arg(args.leave_free))
+        total, budget = p.total_bytes, p.max_working_set_bytes
+
+    print(f"\n  {family_stem_of(target)}  {len(sibs)} quants on the Hub, "
+          f"one architecture")
+    print(f"  probed {probed_repo.split('/')[-1]}: {card.layers} layers, "
+          f"{card.num_experts} experts, top-k {card.top_k}, "
+          f"{card.expert_frac:.1%} expert bytes")
+    print("  those four are the architecture. Every row below shares them; "
+          "only bytes per weight change.\n")
+    if card.num_experts <= 1 or card.expert_frac < 0.5:
+        # Nothing to stream, so the slot machinery is inert and every row would
+        # just restate the file size. Say so instead of drawing a table that
+        # implies a decision.
+        print(f"  this is a dense model ({card.num_experts} expert"
+              f"{'' if card.num_experts == 1 else 's'}, "
+              f"{card.expert_frac:.0%} expert bytes).")
+        print("  slotbank gives no benefit here -- there is no expert bank to "
+              "stream. Sizes:")
+        for repo, tot, _bits in sibs:
+            print(f"    {repo.split('/')[-1]:<{max(len(r.split('/')[-1]) for r,_,_ in sibs)+2}}"
+                  f"{tot / G:>7.1f} GiB")
+        return 0
+
+    name_w = max(len(r.split("/")[-1]) for r, _, _ in sibs) + 6
+    print(f"  {'QUANT':<{name_w}}{'ON DISK':>9}{'FLOOR':>8}{'WIRED':>8}{'B/TOK':>8}")
+    any_fits, margins = False, []
+    for repo, tot, bits in sibs:
+        c = card if repo == probed_repo else scale(card, repo, tot, bits)
+        slots = slot_capacity(c.num_experts, c.top_k, stored_bytes=c.total_bytes,
+                              working_set_bytes=budget, kv_bytes=MIN_KV_BYTES,
+                              expert_param_frac=c.expert_frac)
+        wired = c.resident_bytes + slots * c.layers * c.row_bytes
+        fits = wired <= budget
+        any_fits = any_fits or fits
+        mark = "" if repo == probed_repo else " est"
+        label = repo.split("/")[-1] + mark
+        tail = "" if fits else f"  x  over by {(wired - budget) / G:.1f}G"
+        if not fits:
+            margins.append((wired - budget, label))
+        print(f"  {label:<{name_w}}{c.total_bytes / G:>8.0f}G{c.resident_bytes / G:>7.1f}G"
+              f"{wired / G:>7.1f}G{c.touched_bytes / G:>7.1f}G{tail}")
+
+    print()
+    if not any_fits:
+        floor = slot_floor(card.num_experts, card.top_k)
+        best = min(margins)
+        print(f"  no quant runs here, and every row fails the same way: resident "
+              f"floor plus\n  the minimum C={floor} pack exceeds the "
+              f"{budget / G:.1f} GiB working set. C cannot go\n  below top-k. "
+              f"Closest is {best[1].strip()}, still {best[0] / G:.1f}G over.")
+    print("  one probe covered all of them. 'est' rows are scaled from it; a repo that")
+    print("  keeps embeddings or lm_head at higher precision tilts that scaling, so the")
+    print("  quant you pick gets its own check before anything downloads.")
+    print("  quantisation buys memory, not quality -- this tool cannot measure quality.")
+    return 0 if any_fits else 1
+
+
+def family_stem_of(repo: str) -> str:
+    from slotbank.probe import family_stem
+
+    return family_stem(repo)
+
+
+def _role_state(repo: str, budget: int) -> tuple[str, float]:
+    """What this role costs and whether it still works, computed offline.
+
+    Recomputed on every draw rather than stored: a model that fitted when it was
+    pulled does not fit after more apps are installed, and this is where the
+    user finds that out. Goes through admit.estimate_card rather than reading
+    config.json directly -- expert counts live under half a dozen key spellings
+    and, on Qwen3.5, inside a nested text_config.
+    """
+    from types import SimpleNamespace
+
+    from slotbank.admit import estimate_card
+    from slotbank.layout import MIN_KV_BYTES, slot_capacity, slot_floor
+    from slotbank.registry import local_path
+
+    path = local_path(repo)
+    if path is None:
+        return "not downloaded", 0.0
+    from slotbank.admit import stored_bytes_from_files
+
+    try:
+        card = estimate_card(SimpleNamespace(model_path=path))
+    except (OSError, ValueError, TypeError, KeyError):
+        # estimate_card refuses when it cannot derive bits or parameter count --
+        # correct for admission, wrong for a listing. An unquantised checkpoint
+        # is still a real model; report its size and that it is dense.
+        try:
+            b = stored_bytes_from_files(path)
+        except (OSError, ValueError):
+            return "unreadable", 0.0
+        return "dense, no benefit", b / float(1 << 30)
+    stored = int(getattr(card, "stored_bytes", 0) or 0)
+    e = int(getattr(card, "n_routed_experts", 0) or 0)
+    k = int(getattr(card, "top_k", 0) or 0)
+    if not e or not k:
+        return "dense, no benefit", stored / float(1 << 30)
+    frac = float(getattr(card, "expert_param_frac", 0) or 0.8)
+    c = slot_capacity(e, k, stored_bytes=stored, working_set_bytes=budget,
+                      kv_bytes=MIN_KV_BYTES, expert_param_frac=frac)
+    wired = stored * (1.0 - frac) + stored * frac * (c / float(e))
+    floor = slot_floor(e, k)
+    if wired > budget:
+        return "will not fit", wired / float(1 << 30)
+    state = "ready" if c > floor else f"ready, C={floor} only"
+    return state, wired / float(1 << 30)
+
+
+def _use(args) -> int:
+    """Roles as a settings page: which model answers as what. Nothing else.
+
+    Deliberately not a scheduler or a router -- one model is resident at a time,
+    and a screen implying otherwise would lie about the hardware.
+    """
+    from slotbank.layout import detect_device_profile
+    from slotbank.registry import load_roles, resolve, save_role
+
+    if args.role and (args.model or args.effort):
+        model = resolve(args.model) if args.model else None
+        try:
+            save_role(args.role, model, args.effort)
+        except ValueError as exc:
+            sys.stderr.write(f"slotbank: {exc}\n")
+            return 2
+
+    roles = load_roles()
+    if not roles:
+        print("no roles set yet.\n  slotbank use chat Qwen3.5-35B-A3B-4bit")
+        return 0
+    budget = detect_device_profile(
+        leave_free_bytes=None).max_working_set_bytes
+    print("  slotbank use -- which model answers as what")
+    w = max([len(r) for r in roles] + [6]) + 2
+    m = max([len(v["model"].split("/")[-1]) for v in roles.values()] + [10]) + 2
+    print(f"  {'ROLE':<{w}}{'MODEL':<{m}}{'WIRED':>8}  {'EFFORT':<8}STATE")
+    for role in sorted(roles):
+        v = roles[role]
+        state, wired = _role_state(v["model"], budget)
+        name = v["model"].split("/")[-1]
+        print(f"  {role:<{w}}{name:<{m}}{wired:>7.1f}G  "
+              f"{v.get('effort', '-'):<8}{state}")
+    print("\n  a role is an alias, so every command takes one:")
+    print("     slotbank run @chat          slotbank serve --model @chat")
+    print("  one model is resident at a time. Switching unloads and reloads, and")
+    print("  the page cache the last model warmed does not survive it.")
+    return 0
+
+
+def _search(args) -> int:
+    from slotbank.registry import local_path, search
+
+    q = " ".join(args.query)
+    hits = search(q, limit=args.limit)
+    if not hits:
+        print(f"nothing found for {q!r}")
+        return 1
+    for h in hits:
+        mark = "  [downloaded]" if local_path(h) else ""
+        print(f"  {h}{mark}")
+    print(f"\nInspect one before downloading:  slotbank check <id>")
     return 0
 
 
@@ -466,15 +777,26 @@ def _check(args) -> int:
     from slotbank.probe import probe
 
     G = float(1 << 30)
+    from slotbank.registry import resolve
+
     try:
-        card = probe(args.repo, revision=args.revision)
+        card = probe(resolve(args.repo), revision=args.revision)
     except Exception as exc:                      # network, 404, odd layout
-        sys.stderr.write(f"slotbank: cannot inspect {args.repo}: {exc}\n")
+        target = resolve(args.repo)
+        sys.stderr.write(f"slotbank: cannot inspect {target}: {exc}\n")
+        _suggest(args.repo, target)
         return 2
 
     profile = detect_device_profile(leave_free_bytes=leave_free_arg(args.leave_free))
     disk_free = shutil.disk_usage(os.path.expanduser("~")).free
-    budget = profile.max_working_set_bytes
+    if args.ram:
+        # Metal reports ~74% of installed RAM as the recommended working set
+        # (17.76 of 24.00 measured on this M4); assume the same ratio.
+        total = leave_free_arg(args.ram)
+        budget = int(total * 0.74)
+    else:
+        total = profile.total_bytes
+        budget = profile.max_working_set_bytes
     # C is chosen at load, not fixed at 32. Ask the same function the loader
     # asks (expert_slots._capacity_from_model) so the verdict matches reality.
     slots = slot_capacity(
@@ -496,15 +818,59 @@ def _check(args) -> int:
     print(f"  touched / token  {card.touched_bytes / G:8.2f} GiB  (sets throughput)")
     print()
     wired = card.resident_bytes + pack_est
-    print(f"  this machine: {profile.total_bytes / G:.0f} GiB RAM, "
-          f"{disk_free / G:.0f} GiB disk free")
-    print(f"  slotbank would pick C={slots}: {wired / G:.2f} GiB wired "
-          f"({card.total_bytes / wired:.0f}x smaller than the checkpoint)")
+    who = "this machine" if args.ram is None else f"{total / G:.0f} GiB machine (hypothetical)"
+    print(f"  {who}: working set {budget / G:.1f} GiB"
+          + ("" if args.ram else f", {disk_free / G:.0f} GiB disk free"))
+
+    if slots >= card.num_experts:
+        # The checkpoint fits under the working set, so slot_capacity returns
+        # C=E and nothing is streamed. Worth saying outright: on such a machine
+        # this runtime is stock mlx-lm with extra bookkeeping.
+        print(f"  the whole checkpoint fits -- slotbank picks C=E={card.num_experts} "
+              f"and streams nothing.\n  On this machine slotbank is not doing "
+              f"anything; stock mlx-lm is equally fast.")
+        return 0
+
+    print()
+    print(f"  MEMORY LEDGER at C={slots}")
+    print(f"    wired (unreclaimable, competes with your apps)")
+    print(f"      resident floor        {card.resident_bytes / G:8.2f} GiB")
+    print(f"      slot pack             {pack_est / G:8.2f} GiB   "
+          f"({slots} x {card.layers} rows)")
+    print(f"      {'':<22}{'-' * 12}")
+    print(f"      total wired           {wired / G:8.2f} GiB   "
+          f"({wired / budget:.0%} of working set)")
+    print(f"    evictable")
+    cache = max(0.0, total - wired - LEAVE_FOR_OS)
+    streamed = card.expert_bytes
+    # An UPPER BOUND, not a prediction. Measured on this machine with the 35B:
+    # 8.4 GiB reclaimable but only 4.71 GiB of the bank actually resident
+    # (mincore, 2026-08-25) -- about half of what free RAM implies. See
+    # ROADMAP.md section 1; closing that gap is the open work.
+    print(f"      free for page cache   {cache / G:8.2f} GiB   "
+          f"= at most {min(1.0, cache / streamed):.0%} of the "
+          f"{streamed / G:.0f} GiB bank")
+    print(f"        (upper bound: measured residency runs ~half of free RAM)")
+    print(f"      the rest reads from SSD each time it is routed to")
+    print(f"    the checkpoint is {card.total_bytes / wired:.0f}x the wired footprint")
+
+    # Fitting and being usable are different questions. Bytes that must come
+    # off SSD each token is what decides the second, so print it rather than
+    # letting "runs here" imply a usable rate.
+    cached_frac = min(1.0, cache / streamed)
+    from_ssd = card.touched_bytes * (1.0 - cached_frac)
+    print()
+    print(f"    of the {card.touched_bytes / G:.2f} GiB touched per token, "
+          f"at least ~{from_ssd / G:.2f} GiB comes off SSD")
+    print(f"    (this is the figure that sets throughput, not the parameter "
+          f"count.\n     Two effects push it either way and neither is "
+          f"modelled here: routing\n     skew keeps hot experts cached, "
+          f"while measured residency runs below\n     what free RAM implies.)")
 
     blockers, notes = [], []
     if card.expert_frac < 0.5:
         notes.append("not expert-dominated -- little to stream, little to gain")
-    if card.total_bytes > disk_free:
+    if card.total_bytes > disk_free and not args.ram:
         blockers.append(
             f"needs {card.total_bytes / G:.0f} GiB of disk, {disk_free / G:.0f} GiB free")
     if slots <= floor and card.resident_bytes + pack_est > budget:
