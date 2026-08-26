@@ -20,6 +20,9 @@ dependencies = [
     "mlx==0.32.1",
     "mlx-lm",
     "huggingface-hub>=0.30",
+    # ui.py renders download progress with Rich. It arrives transitively via
+    # mlx-lm -> transformers -> typer today, which is not a contract.
+    "rich>=13.8",
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",
     "pydantic>=2.9,<3",

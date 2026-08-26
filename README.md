@@ -57,22 +57,38 @@ Not included, on purpose: CUDA graphs, PCIe overlap, hybrid CPU experts, tensor 
 
 Measured 2026-08-23 on a fanless **M4 Air, 10 GPU cores, 24 GB unified, 16 KB pages**, `mlx==0.32.1`, `mlx-lm==0.31.3`. Metal reports a 17.76 GiB max recommended working set. Every number is from a script in this repo's history; each config ran cold first, then repeated, and both are shown because the spread is the story.
 
-### Headline: a model nothing else on this machine can run
+### Headline: a model no other runtime tested here can run at 4-bit
 
 `Qwen3.5-35B-A3B` 4-bit — 40 layers, E=256, top-k 8, **19.02 GiB of weights** (16.9 GiB of it experts).
+
+**Three throughput numbers appear throughout this document and they measure
+different things.** Every figure below carries one of these labels; an unlabelled
+number is an editing mistake, not a fourth kind.
+
+| Label | Clock starts | Includes | Answers |
+|---|---|---|---|
+| **cold end-to-end** | process launch | load + prefill + decode | what you actually wait for |
+| **warm sustained decode** | first token | decode only, over the whole run | steady-state serving |
+| **compute-only ceiling** | — | GPU math with I/O removed | how much headroom is left |
+
+They diverge by design. The same C=32 configuration on the 35B is **4.2 cold
+end-to-end** to 256 tokens, **6.1 warm sustained decode**, and short warm windows
+reach 6.5–7.8 because a brief burst can run almost entirely out of experts that
+are already cached. Quoting the largest of those as "the" throughput is the
+usual way these comparisons become dishonest.
 
 | Runtime | Quant | Result | Active memory | Machine |
 |---|---|---|---|---|
 | **llama.cpp** (5 configs) | Q4_K_S, 19.25 GiB | **cannot run** | Metal OOM | drove to critical pressure twice |
 | **stock mlx-lm** (full bank) | MLX 4-bit, 19.02 GiB | 0.005 tok/s (208 s/token) | 18.225 GiB | 13.2 GB compressed, thrashing |
 | **mlx-vlm** 0.6.15 (full bank) | MLX 4-bit, 19.02 GiB | **no tokens** — killed loading | n/a (66% -> 7% free) | swap 8.76 / 10.24 GB |
-| **slotbank** `C=32` (default) | MLX 4-bit, 19.02 GiB | **4.2 tok/s from cold start** to 256 tokens (6.1 decode-only) | **~3.8 GiB footprint** | responsive |
+| **slotbank** `C=32` (default) | MLX 4-bit, 19.02 GiB | **4.2 cold end-to-end** to 256 tokens (**6.1 warm sustained decode**) | **~3.8 GiB footprint** | responsive |
 
 > **Counted from cold start, because that is what you actually wait for.**
 > A run pays ~19 s of fixed cost before the second token: 8.7 s to load and
 > ~10 s of prefill. Quoting only the warm decode rate hides it.
 >
-> | N tokens | wall from process start | effective tok/s | decode-only |
+> | N tokens | wall from process start | cold end-to-end | warm sustained decode |
 > |---|---|---|---|
 > | 32 | 18.7 s | 1.71 | 5.5 |
 > | 64 | 32.8 s | 1.96 | 4.7 |
@@ -82,7 +98,7 @@ Measured 2026-08-23 on a fanless **M4 Air, 10 GPU cores, 24 GB unified, 16 KB pa
 > Effective throughput climbs the whole way because the fixed cost amortises;
 > it only approaches the decode rate for long answers. The same run on the
 > pre-`preadv`, pre-`memoryview` path took **98 s** for those 256 tokens at
-> 2.61 effective tok/s -- so today's two changes are **1.61x measured from
+> 2.61 cold end-to-end -- so today's two changes are **1.61x measured from
 > cold start**, and 1.88x on decode alone. Short answers see less: 1.20x at
 > 32 tokens, because 19 s of load and prefill dominate and neither change
 > touches them.
@@ -125,7 +141,7 @@ Caveat, stated plainly: quantization was matched for fairness. llama.cpp also sh
 
 Re-measured after the read-path work, 35B-A3B, cold start to 256 tokens:
 
-| C | active | eff tok/s (2 reps) | decode-only |
+| C | active | cold end-to-end (2 reps) | warm sustained decode |
 |---|---|---|---|
 | 8 | 1.88 GiB | 3.32 / 4.19 | 4.54 / 5.78 |
 | 16 | 2.41 GiB | 4.06 / 4.30 | 5.62 / 6.02 |
@@ -412,7 +428,23 @@ idle during compute. Overlapping them is worth up to ~45 ms/token, an order of
 magnitude more than every Python cost combined — and is blocked by the fact
 that layer *L*'s expert set is unknown until layer *L-1* has run.
 
-### Phase 3 (MTP): blocked on numerics, not on plumbing
+### Phase 3 (MTP): the ordinary T>1 path is blocked on numerics
+
+> **Two separate questions, answered separately.** This document reaches what
+> look like opposite verdicts on MTP, in two places, and they are about
+> different axes:
+>
+> | Axis | Question | Verdict | Where |
+> |---|---|---|---|
+> | **Correctness** | does MTP through ordinary T>1 MLX execution produce stock output? | **No.** The GatedDeltaNet chunked scan diverges from the recurrent step; ~4% of argmax decisions flip on the 35B. | this section |
+> | **Correctness** | does a specialised MTP path produce stock output? | **Yes** — mlx-vlm's is byte-identical, using per-token GEMV verification kernels and `rollback_speculative_cache`. | this section |
+> | **Economics** | is MTP *worth* its cost here? | **Was no, is now yes.** At 94.3% copy the verify pass could not pay for itself at any acceptance rate; at 43.3% it projects 1.19x. | [Native MTP](#native-mtp-viable-now-worth-12x-not-23x) |
+>
+> So "MTP flipped from rejected to viable" later in this document is an
+> *economic* statement. It does not mean the pread fix made MTP correct — the
+> numerics were never a function of the copy path. Reaching a working MTP still
+> requires adopting the specialised implementation; the pread fix only made
+> doing so worth the effort.
 
 Building MTP inside slotbank means verifying `[confirmed, drafted]` in one T=2
 backbone pass. On this hybrid model that pass **does not compute the same
@@ -503,7 +535,7 @@ shrank what warming buys. Re-measured on 35B-A3B:
 | | warm off | warm on |
 |---|---|---|
 | model load | 3.8 s | 10.2 s |
-| decode-only | 4.64 tok/s | 6.03 tok/s (1.30x) |
+| warm sustained decode | 4.64 tok/s | 6.03 tok/s (1.30x) |
 
 The pass costs **6.47 s** and returns **49.5 ms/token**, so it breaks even at
 **131 tokens**. At 128 tokens it was a wash; at 256 it won by only 1.04x. Below
@@ -519,9 +551,9 @@ and only between requests, never mid-stream.
 
 | request | before (warm at load) | after (deferred) |
 |---|---|---|
-| 32 tokens | 25.5 s wall, 1.27 eff tok/s | **18.7 s, 1.71** (1.34x) |
+| 32 tokens | 25.5 s wall, 1.27 cold end-to-end | **18.7 s, 1.71** (1.34x) |
 | load time | 11.35 s | **3.43 s** |
-| 256 tokens | 4.29-4.45 eff tok/s | **4.55** |
+| 256 tokens | 4.29-4.45 cold end-to-end | **4.55** |
 
 Set `SLOTBANK_WARM_MIN_TOKENS=0` to restore eager warming, or `SLOTBANK_WARM=0`
 to disable the pass entirely.
@@ -580,46 +612,186 @@ any tuning flag in this repo.
 
 ### Accuracy
 
-Default output is **bit-identical to stock mlx-lm** — maxabs 0.0 on real-model logits, including through mlx-lm's sorted-routing path. Expert row reads were verified bit-identical for both `U32` and `BF16` tensors. 51 tests pass.
+Default output is **bit-identical to stock mlx-lm** — maxabs 0.0 on real-model logits, including through mlx-lm's sorted-routing path. Expert row reads were verified bit-identical for both `U32` and `BF16` tensors.
+
+**Scope of that claim.** It was measured on the models marked *measured* in
+[Model support](#model-support) — `Qwen3.5-35B-A3B`, `Qwen3-30B-A3B`, `OLMoE`.
+The *argument* for it generalises: slotbank changes which rows sit in the GEMM's
+operand and in what order they were fetched, not the arithmetic, so a family
+whose `SwitchLinear` the patch attaches to should behave identically. But an
+argument is not a measurement, and "bit-identical" is not asserted for any family
+listed as *supported by class*. The one deliberate exception is
+`SLOTBANK_WAVES=1`, which is off by default precisely because it breaks this.
 
 `SLOTBANK_WAVES=1` is the one exception and is off by default; see [Environment](#environment).
 
 ## Install
 
-Apple Silicon macOS. Python 3.10+. [uv](https://docs.astral.sh/uv/) recommended.
+Apple Silicon macOS, Python 3.10+.
+
+**As a tool** — puts `slotbank` on your `PATH` in an isolated environment, so it
+is available in any terminal and its dependencies cannot collide with a project:
 
 ```bash
-cd ~/Desktop/slotbank
-uv venv --python 3.12
-source .venv/bin/activate
+uv tool install slotbank          # or: pipx install slotbank
+slotbank                          # shows what to do next
+```
+
+Add `slotbank[vlm]` for `kimi_k3`, `deepseek_v4`, and `minimax_m3` — model
+classes `mlx-lm` does not carry. It pulls ~370 MB of extra dependencies, so it is
+not the default.
+
+**From source**, for development:
+
+```bash
+git clone <repo> && cd slotbank
+uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -e ".[dev]"
+uv build --wheel               # produces dist/slotbank-*.whl
 ```
 
 ## Quick start
 
-Admit first (no weights are downloaded):
+Models are managed for you. Nothing here needs a filesystem path.
 
 ```bash
-slotbank admit --model /path/to/Qwen3.5-35B-A3B-4bit --leave-free 8g
+slotbank check Qwen3.5-35B-A3B-4bit    # will it run here? (no download)
+slotbank pull  Qwen3.5-35B-A3B-4bit    # check first, then download
+slotbank run   Qwen3.5-35B-A3B-4bit    # chat, model stays loaded
+slotbank list                          # what is downloaded, and its expert share
+slotbank rm    Qwen3.5-4B-4bit         # free the disk
 ```
 
-One-shot generate:
+`check` reads the safetensors headers over HTTP range requests — a few MB
+against a checkpoint of any size, ~6 s for an 86 GiB model across 42 shards —
+and reports the two figures that decide viability:
 
-```bash
-slotbank generate --model /path/to/model --prompt "hello" --max-tokens 64 --leave-free 8g
 ```
+mlx-community/Qwen3.5-35B-A3B-4bit  (qwen3_5_moe, 4 shards)
+  layers 40  experts 256  top-k 8
+  total on disk       18.99 GiB
+    routed experts    16.88 GiB  (88.9%, streamed)
+    resident floor     2.12 GiB  (must fit in RAM)
+  per expert           1.69 MiB
+  touched / token      0.53 GiB  (sets throughput)
+
+  this machine: 24 GiB RAM, 25 GiB disk free
+  slotbank would pick C=32: 4.23 GiB wired (4x smaller than the checkpoint)
+
+  runs here. 19 GiB of weights, 4.2 GiB wired.
+```
+
+The resident floor is what must stay in RAM no matter how large the checkpoint
+is; total parameter count is not the metric that decides whether a model loads.
+`pull` runs this first and refuses a model that cannot run, because discovering
+that after downloading 86 GiB is the waste `check` exists to prevent
+(`--force` overrides).
+
+**Model storage is the Hugging Face cache**, not a private blob store. A model
+pulled by mlx-lm or any other MLX tool is already visible to `slotbank list`, and
+nothing is duplicated — which matters when the checkpoint is larger than your
+free disk.
+
+Short names resolve against the cache first, then against known namespaces, so
+`Qwen3.5-35B-A3B-4bit` and `mlx-community/Qwen3.5-35B-A3B-4bit` and a local
+directory all work. GGUF repos are never matched: that is llama.cpp's format.
 
 Serve the three agent doors on localhost:
 
 ```bash
-slotbank serve --model /path/to/model --host 127.0.0.1 --port 8080 --leave-free 8g
+slotbank serve --model Qwen3.5-35B-A3B-4bit --port 8080
+```
+```
+slotbank serving mlx-community/Qwen3.5-35B-A3B-4bit on http://127.0.0.1:8080
+  OpenAI / Codex / OpenCode  OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+  Claude Code                ANTHROPIC_BASE_URL=http://127.0.0.1:8080
 ```
 
 Optional `--api-key` is checked on `Authorization: Bearer` and `x-api-key`.
 
+The lower-level `slotbank generate --model <path>` and `slotbank admit --model
+<path>` still take explicit paths, for scripting against a checkpoint outside the
+cache.
+
 ## Agent APIs
 
 The server is local HTTP. Point the client at this process. Do not send your weights to anyone else.
+
+### What `serve` is for
+
+Not concurrency — the engine is single-model and processes one request at a
+time. `serve` exists to **stop paying the fixed cost**, which on a file-backed
+runtime is most of a short request.
+
+Measured on the 35B, same prompt, same 48 tokens, `temperature 0`:
+
+| | Per request | tok/s |
+|---|---|---|
+| fresh `slotbank run` process, twice | 18.2 s, 18.7 s | 2.57–2.64 cold end-to-end |
+| warm server, request 1 | 15.9 s | 3.01 |
+| warm server, requests 2–4 | 12.2–13.4 s | **3.58–3.94** |
+
+Two separate effects, and it is worth separating them:
+
+1. **Load elision, ~6 s.** The process already holds the model. This is constant
+   per request and is the larger effect.
+2. **Warm slots, ~20%.** Request 1 through the server is still slower than
+   requests 2–4, because the C-slot pack and the page cache behind it start cold
+   and fill with the experts this workload actually routes to. This effect is
+   specific to a runtime whose cost is dominated by expert reads — it is much
+   weaker for a runtime holding all weights resident, which has nothing to warm.
+
+Net **~1.45x on a 48-token request**. That ratio is not fixed: the saving is
+roughly constant in seconds, so it dominates short requests and vanishes into the
+noise on long ones. An agent doing many small tool-call round trips is the case
+where it matters most, which is the case `serve` is aimed at.
+
+What `serve` does **not** currently do: run more than one model, unload on idle,
+or survive as a daemon. It holds one model for the lifetime of the process.
+
+### Viability of a multi-model daemon
+
+Measured, not projected — the question is whether slotbank's design makes an
+Ollama-style daemon cheap or expensive, and the answer is unusually favourable
+for a reason specific to this runtime.
+
+**Do two engines coexist?** Yes. MLX arrays are thread-bound and each `Engine`
+owns its loader thread, so this was the gate. Two engines loaded, generated,
+alternated, and unloaded in one process with no Metal or threading conflict.
+
+**What does residency cost?** Almost nothing, because slotbank does not hold
+weights resident. A second model adds its resident floor plus its pack, not its
+checkpoint:
+
+| Configuration | Process RSS | 35B warm sustained decode |
+|---|---|---|
+| 35B alone | 3.66 GiB | 6.00 tok/s |
+| 35B + Qwen3.5-4B both loaded | **4.78 GiB** | 5.26 tok/s (**0.88x**) |
+| after unloading the 4B | 3.17 GiB | 6.76 tok/s |
+
+A 19 GiB model and a 2.8 GiB model, both live and both answering, in 4.78 GiB.
+The 4B ran at 14.31 tok/s concurrently. The cost to the large model is **~12%**,
+and it is bandwidth contention rather than capacity — the same effect as any
+other neighbour.
+
+This is the inverse of the usual situation. For a runtime that holds weights
+resident, a second model costs a second full residency and is usually impossible;
+here the marginal cost of an idle-but-loaded model is a pack, which is why
+`C` being small is what makes multi-model cheap.
+
+**Does unload reclaim?** It does now. It did not before this measurement:
+`Runtime.close` called `mx.clear_cache()` *before* dropping the model reference,
+so the clear freed nothing and the buffers then landed in MLX's allocator cache
+as they released — **1.09 GiB retained per unloaded model**, which would make an
+idle-unload policy do nothing at all. Reordering the drops before the clear takes
+reclaim to immediate and complete, and the remaining model recovers to 0.97–1.13x
+of its solo rate.
+
+**What is actually left to build**, given the above: a process that owns several
+engines, an LRU over them keyed on last use, and routing by the `model` field the
+API layer already parses. Load cost is 3.4 s for the 35B and 1.8 s for the 4B, so
+an eviction is cheap to undo. None of this is a runtime change — the hard parts
+(coexistence, reclaim, per-model wired cost) are measured and settled.
 
 | Client | Protocol | Base URL |
 |---|---|---|
@@ -721,6 +893,19 @@ In `mlx-lm` 0.31.3 that is **34 architectures**:
 
 Several more inherit a covered base class: **`kimi_k25`** (via `deepseek_v3`),
 **`glm_moe_dsa`** (via `deepseek_v32`), **`qwen3_5_moe`** (via `qwen3_5`).
+
+Three status levels, and the difference between them is the whole point of this
+table. **Only "measured" means a model has produced tokens here.**
+
+| Level | What was verified | What was not |
+|---|---|---|
+| **measured** | loaded, generated, output compared against stock | — |
+| **supported by class** | the patch attaches to this family's `SwitchLinear`; the arithmetic is unchanged | that the model loads, runs, or fits |
+| **not loadable** | `mlx-lm` has no class for it | — |
+
+Attaching to a `SwitchLinear` successfully proves one layer type is handled. It
+does not prove an architecture works: tensor-name prefixes, tokenizer quirks, and
+non-MoE layers all break independently of anything slotbank touches.
 
 | Family | Status |
 |---|---|
@@ -877,6 +1062,127 @@ worst case.
 
 The heap is one LPDDR pool. There is no host↔GPU expert copy in the CUDA sense.
 
+### Why unified memory is not just "a big GPU"
+
+The appeal of unified memory is that a 24 GB Mac appears to have 24 GB of VRAM.
+The reality is that three different subsystems have claims on that pool, and only
+one of them can refuse.
+
+Queried on this machine (`mx.device_info()`):
+
+```
+memory_size                       24.00 GiB   installed
+max_recommended_working_set_size  17.76 GiB   what Metal will let you hold (74%)
+max_buffer_length                 13.32 GiB   the largest SINGLE allocation
+```
+
+Those are separate walls, and it is worth being precise about which one binds,
+because it is easy to overstate the second. **In practice it does not bind at
+this scale.** Checkpoints already arrive split per layer and per projection: the
+largest single tensor in the 35B is a stacked `(256, 512, 256)` U32 expert weight
+at **128 MiB**, about 106x below the cap. Neither slotbank's per-layer packs nor
+stock mlx-lm's stacked banks come close.
+
+Where it does bind is the one design nobody should reach for anyway: the entire
+16.88 GiB expert bank as a single `mx.array`. That exceeds 13.32 GiB and is
+therefore not merely slow, it is unallocatable. Worth knowing as a hard floor
+under the design space — not as the reason anything here fails.
+
+**The wall that actually binds is the working-set limit, and it binds in
+aggregate.** No individual allocation is too large; the sum of what is
+simultaneously wired is. That is why the interesting question is never "how big
+is this tensor" but "how many of them are resident at once" — which is exactly
+what `C` controls.
+
+The working-set limit is not the OS being conservative. Anything a GPU is
+actively reading must be **wired** — physically resident, exempt from paging,
+because a GPU cannot take a page fault the way a CPU thread can. Wired pages are
+the one tier macOS cannot reclaim under pressure. The 74% figure is the kernel
+reserving enough unwireable headroom to keep WindowServer, the compositor, and
+your other processes alive.
+
+### The three tiers, and what each one costs
+
+| Tier | Reclaimable? | Cost to read | What slotbank puts here |
+|---|---|---|---|
+| **wired** (Metal working set) | **no** | — (already there) | the C-slot pack, ~3.5 GiB |
+| **OS page cache** (file-backed, clean) | yes, instantly | ~10 GB/s | as much of the bank as fits |
+| **SSD** | n/a | 1000–3300 MiB/s via `pread` | the rest |
+| **compressor / swap** | — | catastrophic | *nothing, by design* |
+
+The fourth row is the point. A clean, file-backed page is **free to evict**: the
+kernel drops it and re-reads from disk if needed. A dirty anonymous page — which
+is what a full weight residency looks like — cannot be dropped. It must be
+compressed or swapped, and both cost far more than the re-read would have.
+
+This is the entire difference between the runtimes benchmarked above. Stock
+mlx-lm holds 18.2 GiB of *anonymous* pages and reaches 0.005 tok/s with 13.2 GB
+in the compressor. slotbank holds 3.5 GiB wired and lets the other 15 GiB be
+*file-backed*, where eviction is a no-op. Same model, same machine, same total
+bytes touched — different tier, four orders of magnitude in throughput.
+
+### Why `free` is always near zero, and why that is fine
+
+macOS does not leave RAM idle. On this machine right now, `vm_stat` reports
+~140,000 file-backed pages and only ~4,200 speculative — free memory is a rounding
+error, and that is the design working correctly. Every byte not otherwise claimed
+is holding cache that costs nothing to give back.
+
+So `free` is the wrong scarcity signal, and reading it as one is how you conclude
+a healthy machine is about to die. slotbank uses three signals instead
+(`src/slotbank/um.py`):
+
+| Signal | Source | Means |
+|---|---|---|
+| **pressure level** | `kern.memorystatus_vm_pressure_level` | 1 normal, 2 warn, 4 critical — the kernel's own verdict |
+| **reclaimable** | free + speculative + inactive + purgeable | what could be handed back without swapping |
+| **compressor growth** | `Pages occupied by compressor` over time | the machine is already paying, not about to |
+
+Only the third distinguishes "the cache is full because caching works" from "the
+cache is full because we are in trouble." At the time of writing this machine has
+2,243,829 pages held in the compressor occupying 541,761 — a **4.1:1** ratio,
+meaning ~34 GiB of logical pages squeezed into ~8 GiB. That is the compressor
+succeeding; it is also the last thing standing between the machine and swap.
+
+### How it degrades under strain
+
+Degradation is not graceful in one smooth curve. There are three distinct
+regimes, and slotbank is engineered to stay in the first:
+
+**1. Cache eviction (normal).** Wired footprint is fixed; the page cache shrinks
+under pressure. A miss that would have been served at ~10 GB/s is served from SSD
+at 1000–3300 MiB/s instead. **Throughput falls; nothing fails.** Measured under an
+adversarial bandwidth-bound neighbour: 6.7–7.5 → 4.64 warm sustained decode
+(~1.5x), while the neighbour itself slowed ~2x. Both lose, because on unified
+memory the contended resource is **bandwidth, not capacity** — and no caching
+strategy fixes bandwidth.
+
+**2. GPU contention (bad, recoverable).** A GPU-heavy neighbour is far worse than
+a memory-heavy one: decode blocks on the GPU ~40 times per token, so queueing
+behind another process's command buffers costs **6.7x**. This is a scheduling
+problem, not a memory problem, and no amount of RAM helps.
+
+**3. Wired overcommit (fatal).** If wired demand approaches the working-set limit,
+there is no reclaim path — the kernel cannot evict wired pages, so it compresses
+and then swaps *everything else*, including the UI. This is what a full-residency
+run does, and it was observed twice during this work: once at 571 MB free during a
+64k prefill, and once as a hard freeze from a competing runtime configured for
+full residency. The machine did not recover on its own.
+
+Slotbank's defence against regime 3 is structural rather than reactive: `C` is
+frozen at load, so the wired footprint cannot grow mid-generate no matter what
+the prompt does. Pressure can shrink the KV cache and the warm budget, but it
+**never resizes `C`**. A dial that could grow under load is a dial that can reach
+the cliff, and the cliff has no recovery path.
+
+### What this buys in practice
+
+The wired footprint is ~3.5 GiB for a 19 GiB model and is nearly independent of
+context — 16x the context costs 80 MB. That is why the machine stays usable: your
+browser and editor are competing with 3.5 GiB of unreclaimable memory, not 18.2.
+An I/O-light, GPU-free neighbour (editing, browsing, most development) contends
+far less than the adversarial figures above, which are close to worst case.
+
 Leave-free (when you omit `--leave-free`):
 
 | Installed RAM | Left free |
@@ -952,6 +1258,103 @@ slotbank serve    --model PATH [--host 127.0.0.1] [--port 8080] [--api-key KEY] 
 | `SLOTBANK_PREFIX_CACHE` | off | `1` to reuse KV across requests sharing a prefix (agentic workloads) |
 | `SLOTBANK_LOOKAHEAD` | `0` | `k` candidate tokens per verify pass; needs `(k+1)*top_k <= C` and a trimmable cache |
 | `SLOTBANK_READ_THREADS` | `8` | miss reads per layer via threaded `pread`; `0` falls back to the mmap + `madvise` path (1.58x slower) |
+| `SLOTBANK_KV_BITS` | off | `8` to quantise the KV cache past `SLOTBANK_KV_START`; `4` accepted but not recommended |
+| `SLOTBANK_KV_START` | `4096` | context length past which the KV cache is quantised |
+
+### KV cache quantisation
+
+The KV cache, not the model, sets the ceiling on context. On Qwen3-30B-A3B it is
+96 KiB per token — 48 layers × 4 kv heads × 128 head dim × 2 for K and V × 2
+bytes — so 150k tokens of chat costs 13.7 GiB, against a 16 GiB working set that
+already holds 3.2 GiB of shared weights. Admission checks once at load and never
+rechecks, so the ceiling is currently discovered by thrashing.
+
+`SLOTBANK_KV_BITS=8` shrinks the cache 1.88× (measured 120.0 → 63.8 MiB over
+1055 tokens), moving the ceiling from roughly 122k to 230k tokens on 24 GB.
+Measured on 1024 tokens of real text, six layers sampled:
+
+| bits | KiB/token | K rel err | V rel err | top-1 attention preserved |
+| --- | --- | --- | --- | --- |
+| fp16 | 96.0 | — | — | 100.0% |
+| 8-bit | 51.0 | 0.0138 | 0.0084 | 96.9% |
+| 4-bit | 27.0 | 0.1462 | 0.1040 | 78.1% |
+
+`top-1` is the share of positions whose highest-attention token is unchanged
+after quantisation, probed with keys as queries.
+
+**This buys memory, not speed.** mlx dispatches a quantised cache to
+`quantized_scaled_dot_product_attention`, which is *not* fused: two
+`quantized_matmul` calls with the full N-wide score matrix materialised between
+them, where the fp16 path uses `mx.fast.scaled_dot_product_attention` and never
+materialises it. Fewer bytes therefore does not mean less time. Attention cost
+per generated token, ×48 layers, medians of two runs of the kernel alone:
+
+| ctx | fp16 | 8-bit | 4-bit |
+| --- | --- | --- | --- |
+| 4,096 | 46 ms | 52 ms | 40 ms |
+| 16,384 | 44 ms | 52 ms | 45 ms |
+| 65,536 | 165 ms | 341 ms | 126 ms |
+| 150,016 | 370 ms | 873 ms | 393 ms |
+
+At 150k, 8-bit costs +504 ms per token — 6.1× more than the entire 82 ms/token
+of expert reads that the freed 6.43 GiB could buy back in the best case. Use
+8-bit to make a context *fit*, not to make it fast. 4-bit is roughly speed-neutral
+and frees more, but see the quality table above before reaching for it.
+
+That table also shows where the real long-context bottleneck is: at 65k and
+beyond, attention alone exceeds the 154 ms/token measured for a whole decode
+step at ~1k context. Expert I/O is a short-context problem. Attention is
+O(N) per token, so the only lever that makes long windows *faster* is dropping
+tokens (eviction), not shrinking them (quantisation).
+
+4-bit is accepted but not recommended for quality, and the reason is structural.
+`mx.quantize` groups scales along `head_dim`, so each token's key is scaled
+across its own channels. K's outliers sit in a *fixed* channel — measured, the
+same channel is the largest for 93.6% of tokens, against 29.2% for V — so a
+per-token group pays for an outlier it could have isolated. Quantising K
+per-channel instead measures 3.5× lower error at an identical scale budget, and
+the ratio holds flat from 128 to 2048 tokens. That is not an mlx defect:
+per-channel groups span 64 *tokens*, and `mx.quantize` refuses a token count that
+is not a multiple of the group size, so a decoder appending one token per step
+cannot form them. Closing the gap needs a KIVI-style fp16 residual buffer for
+the partial group.
+
+Quantisation is one-way and whole-cache, which is why it waits for
+`SLOTBANK_KV_START`: below a few thousand tokens the cache is a small share of
+the bytes read per token, and all of the quality cost lands on long-context
+retrieval. `SLOTBANK_PREFIX_CACHE` is disabled while quantising — see the note in
+`runtime.py`. Within-session KV reuse is unaffected.
+
+### Why C is a dial down
+
+Cache hit rate is the wrong objective. A bigger pack removes reads, but it
+evicts the OS page cache that was serving them, so each surviving miss gets
+more expensive. Measured on Qwen3-30B-A3B (E=128, top-8), 512-token context,
+one interleaved round:
+
+| C | hit rate | read/token | I/O wall | effective BW | tok/s |
+| --- | --- | --- | --- | --- | --- |
+| 8 | 41.1% | 0.559 GiB | 2.93 s | 12.21 GiB/s | 10.26 |
+| 16 | 62.3% | 0.358 GiB | 3.19 s | 7.16 GiB/s | 8.70 |
+| 32 | 87.0% | 0.123 GiB | 1.85 s | 4.27 GiB/s | 7.93 |
+
+Going from C=8 to C=16 reads **36% fewer bytes and spends 9% more time doing
+it**. 12.21 GiB/s is far above this SSD's ~2.9 GiB/s, so at C=8 the reads were
+being served from page cache; by C=32 effective bandwidth is converging on real
+disk. Both terms move against you — the gather also runs over a larger array,
+so GPU time rose 2.97 → 3.60 → 5.29 s across the same sweep.
+
+This is corroborated independently by [MawForge](https://arxiv.org/html/2607.09686),
+validated on a 24 GB unified-memory Mac with an 18 GiB serving budget: Gemma Q8
+at 4K went from 13.86 tok/s at a 35% cache to **1.30 tok/s at 65%**, while hit
+rate *improved* from 86.73% to 95.03%. Their collapse fires near 84% system-used
+— an absolute-footprint threshold, not a cache fraction.
+
+Caveat on the table above: three points, one prompt length, one round. It is
+enough to establish the mechanism and the direction, not enough to retune the
+default — `C = max(floor, E // 8)` is a ratio of `E`, while the evidence says the
+binding variable is absolute footprint against free memory. Those coincide only
+by accident.
 
 `SLOTBANK_WAVES=1` makes prefill ~1.3× faster (49.4 s → 37.3 s at 865 tokens). It splits one gather into several, which changes float16 split-K rounding, so output stops being bit-identical to stock — 1 ULP per layer, ~4% relative on final logits. Greedy tokens matched 48/48 when measured, but bit-identical is the accuracy contract, so it is off by default. It does **not** reduce the prefill peak.
 
@@ -1363,8 +1766,16 @@ because speculation pays in compute and charges in bandwidth.
 **The gating condition, and crossing it.** Writing *f* for the copy fraction of
 decode, speedup is `(1 + a) / (2.03f + 1.05(1 - f))`. It crosses 1.0 near
 f = 0.85. The [pread fix](#the-prefetch-cost-3x-the-read-it-was-hinting) took
-f from **0.943 to 0.433**, so MTP flipped from rejected to viable — not because
-anything about MTP changed, but because the denominator did.
+f from **0.943 to 0.433**, so MTP flipped from economically rejected to
+economically viable — not because anything about MTP changed, but because the
+denominator did.
+
+**This is a statement about cost, not correctness.** The numerics problem in
+[Phase 3](#phase-3-mtp-the-ordinary-t1-path-is-blocked-on-numerics) is untouched
+by any of this: ordinary T>1 execution on a hybrid model still diverges from
+stock, at every copy fraction. What changed is that adopting the *specialised*
+MTP path — which is correct — now buys something, where before it bought nothing.
+Both conditions must hold, and only the second one moved.
 
 #### Measured, not projected
 

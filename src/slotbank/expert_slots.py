@@ -68,9 +68,20 @@ def _capacity_from_model(model, capacity: int | None, um=None) -> int:
     if budget:
         from slotbank.layout import capacity_for_budget
 
-        # A hard cap on wired bytes, letting throughput float. Raising C past
-        # the default is a measured loss on a machine where the bank does not
-        # fit in page cache, so this is a dial DOWN, not up.
+        # A hard cap on wired bytes, letting throughput float. This is a dial
+        # DOWN, not up: raising C removes reads but makes the survivors more
+        # expensive, because the pack evicts the page cache that was serving
+        # them. Measured on Qwen3-30B-A3B (E=128, top-8), 512-token context:
+        #
+        #    C    hit   read/tok   I/O wall   effective BW   tok/s
+        #    8   41.1%   0.559 G     2.93 s    12.21 GiB/s   10.26
+        #   16   62.3%   0.358 G     3.19 s     7.16 GiB/s    8.70
+        #   32   87.0%   0.123 G     1.85 s     4.27 GiB/s    7.93
+        #
+        # C=8 -> C=16 reads 36% fewer bytes and spends 9% MORE time doing it.
+        # 12.21 GiB/s is well above this SSD's ~2.9 GiB/s, so those reads were
+        # page-cache hits; by C=32 the bandwidth is converging on real disk.
+        # Hit rate is an actively misleading objective here.
         return capacity_for_budget(
             int(card.stored_bytes),
             int(card.n_routed_experts or n_e or floor),
@@ -504,13 +515,26 @@ class SliceStore:
         raw = mx.array(memoryview(mm[off : off + row_bytes]))
         return raw.view(getattr(mx, mx_dtype)).reshape(spec["shape"][1:])
 
-    def warm(self, tensor_key: str, experts) -> int:
+    def warm(self, tensor_key: str, experts, advise: bool = True) -> int:
         """Fault rows into the page cache. Touches one byte per page rather than
-        copying the row, so this costs no heap and no MLX allocation."""
+        copying the row, so this costs no heap and no MLX allocation.
+
+        The touch is what makes the pages *stick*. Measured 2026-08-25 on a
+        0.75 GiB range, two rotations: pages populated by `pread` alone fall out
+        of the page cache inside 15-60 s even with the fd open, a mapping held and
+        4.5 GiB reclaimable; the same pages touched through the mapping were
+        still 92.7%/96.0% resident at 180 s. Residency follows the mapping's
+        resident set, not the read.
+
+        ``advise=False`` skips the MADV_WILLNEED pass. Use it when the bytes
+        were just read by `pread` and are already in the page cache, so the
+        touch is a soft fault and the advise would only add VM bookkeeping.
+        """
         spec = self.layout(tensor_key)
         if spec is None:
             return 0
-        self.prefetch(tensor_key, experts)
+        if advise:
+            self.prefetch(tensor_key, experts)
         mm = self._mm(spec["path"])
         total = 0
         for e in experts:
