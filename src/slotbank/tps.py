@@ -176,6 +176,21 @@ STRATEGIES: tuple[Strategy, ...] = (
         needs_trim_cache=True,
     ),
     Strategy(
+        "named-kv-survey",
+        REJECTED,
+        "PyramidKV, Ada-KV, KVTC, DeltaKV, TriAttention, BUZZ, Sparse-vLLM/KVStream.",
+        "None attempted. They assume a uniform full-attn KV you can top-k evict, "
+        "PCA-code, or page. 48/64 layers here are ArraysCache (already O(1)); "
+        "evicting the 16 attn layers without GDN rollback changes 27B text. "
+        "KVTC/DeltaKV/BUZZ/Sparse-vLLM are CUDA kernels and page tables, not "
+        "the one Metal worker. Daily --draft forbids even SLOTBANK_KV_BITS. "
+        "Closest in-tree: 8-bit KV when not drafting (KIVI residual is a comment, "
+        "not code), context OS, append-only suffix. vLLM/SGLang hybrid managers "
+        "separate a GDN pool from a KV pool — they still do not Pyramid the "
+        "recurrent state.",
+        needs_trim_cache=True,
+    ),
+    Strategy(
         "hybrid-kv-dynamic-page",
         REJECTED,
         "Dynamically page/offload hybrid KV so OMP's harness fits in 24 GB.",
@@ -368,6 +383,7 @@ def catalog_sound() -> None:
         "mtp-plus-dflash",
         "sliding-window-kv",
         "hybrid-kv-dynamic-page",
+        "named-kv-survey",
         "kv-quant-with-draft",
         "pflash-drop-prompt",
         "reverse-spec-small-writer",
