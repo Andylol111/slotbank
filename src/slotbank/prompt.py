@@ -123,8 +123,9 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
     if cap and len(ids) > cap:
         raise ValueError(
             f"prompt is {len(ids)} tokens (cap {cap}). "
-            "27B on 24 GB cannot prefill a repo-sized OMP context. "
-            "Start omp from ~ or /tmp, not the slotbank checkout. "
+            "27B on 24 GB cannot prefill that. "
+            "OMP over ~50% of 33K is tools, MCP, or a project (footer ↳ name), "
+            "not just cwd. New session: omp --tools read, no project, no MCP. "
             "Override: SLOTBANK_MAX_PROMPT=0"
         )
     return ids

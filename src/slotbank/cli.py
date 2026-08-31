@@ -481,6 +481,7 @@ def _omp(args) -> int:
     print("then:   omp models refresh")
     print("        start omp from ~ or /tmp, not this repo")
     print("        (cwd ~/Desktop/slotbank dumps README+src into the prompt)")
+    print("        wait for serve 'ready'; omp --tools read  (31 tools ≈ 33K)")
     return 0
 
 
@@ -533,7 +534,8 @@ def _serve(args) -> int:
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
-            f"  cwd                        start omp from ~ or /tmp, not this repo"
+            f"  cwd                        start omp from ~ or /tmp, not this repo\n"
+            f"  first hi                   wait for 'ready'; omp --tools read"
         )
     proxy = EngineProxy(LoadingEngine(mid))
     app = create_app(proxy, api_key=args.api_key)
@@ -555,7 +557,7 @@ def _serve(args) -> int:
 
     threading.Thread(target=boot, daemon=True, name="slotbank-load").start()
     print(f"slotbank serving {mid} on http://{args.host}:{args.port}\n"
-          f"  (weights still loading; /models is already up for OMP)\n"
+          f"  (weights still loading; do not send in OMP until this process prints 'ready')\n"
           f"  OpenAI / Codex / OpenCode  "
           f"OPENAI_BASE_URL=http://{args.host}:{args.port}/v1\n"
           f"  Claude Code / OMP          "

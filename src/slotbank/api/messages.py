@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from slotbank.load import EngineNotReady, is_loading, poll_until_ready
 from slotbank.types import SamplingParams
 
 
@@ -123,9 +124,11 @@ def to_openai_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] 
 
 
 def _err(status: int, typ: str, message: str) -> JSONResponse:
+    headers = {"Retry-After": "15"} if status == 503 else None
     return JSONResponse(
         {"type": "error", "error": {"type": typ, "message": message}},
         status_code=status,
+        headers=headers,
     )
 
 
@@ -137,16 +140,16 @@ def _stop(finish: str | None, matched: str | None) -> tuple[str, str | None]:
     ), None
 
 
+def _tokenize(engine, req: MessagesRequest) -> list[int]:
+    chat = to_chat_messages(req)
+    if not chat:
+        raise ValueError("messages: no tokenizable content")
+    return engine.tokenize_chat(chat, to_openai_tools(req.tools))
+
+
 def register_messages(app: FastAPI, engine) -> None:
     @app.post("/v1/messages")
     def messages(req: MessagesRequest):
-        try:
-            chat = to_chat_messages(req)
-            if not chat:
-                return _err(400, "invalid_request_error", "messages: no tokenizable content")
-            ids = engine.tokenize_chat(chat, to_openai_tools(req.tools))
-        except ValueError as exc:
-            return _err(400, "invalid_request_error", str(exc))
         sampling = SamplingParams(
             temperature=1.0 if req.temperature is None else float(req.temperature),
             top_p=1.0 if req.top_p is None else float(req.top_p),
@@ -157,9 +160,15 @@ def register_messages(app: FastAPI, engine) -> None:
         mid = f"msg_{uuid.uuid4().hex}"
         if req.stream:
             return StreamingResponse(
-                _stream(engine, ids, sampling, req.model, mid),
+                _stream_when_ready(engine, req, sampling, mid),
                 media_type="text/event-stream",
             )
+        try:
+            ids = _tokenize(engine, req)
+        except EngineNotReady as exc:
+            return _err(503, "overloaded_error", str(exc))
+        except ValueError as exc:
+            return _err(400, "invalid_request_error", str(exc))
         result = engine.generate(ids, sampling)
         reason, seq = _stop(result.finish_reason, result.matched_stop)
         content: list[dict[str, Any]] = []
@@ -195,8 +204,9 @@ def register_messages(app: FastAPI, engine) -> None:
     @app.post("/v1/messages/count_tokens")
     def count_tokens(req: MessagesRequest):
         try:
-            chat = to_chat_messages(req)
-            ids = engine.tokenize_chat(chat, to_openai_tools(req.tools))
+            ids = _tokenize(engine, req)
+        except EngineNotReady as exc:
+            return _err(503, "overloaded_error", str(exc))
         except ValueError as exc:
             return _err(400, "invalid_request_error", str(exc))
         return {"input_tokens": len(ids)}
@@ -210,6 +220,9 @@ _DONE = object()
 # OMP aborts Anthropic streams that go silent during 27B prefill. A ping
 # every few seconds is cheaper than a stall after "hi".
 STREAM_PING_S = 5.0
+# 27B 4-bit load on the Air is tens of seconds; hold the SSE open with pings
+# so a first hi during boot is not a 400.
+LOAD_WAIT_S = 180.0
 
 
 def _with_pings(it, timeout: float | None = None):
@@ -238,20 +251,44 @@ def _with_pings(it, timeout: float | None = None):
         yield item
 
 
-def _stream(engine, ids, sampling, model: str, mid: str):
+def _stream_when_ready(engine, req: MessagesRequest, sampling, mid: str):
+    """Ping while weights load, then tokenize. Avoids a 400 on first hi."""
     yield _event("message_start", {
         "type": "message_start",
         "message": {
             "id": mid,
             "type": "message",
             "role": "assistant",
-            "model": model,
+            "model": req.model,
             "content": [],
             "stop_reason": None,
             "stop_sequence": None,
-            "usage": {"input_tokens": len(ids), "output_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 0},
         },
     })
+    try:
+        if is_loading(engine):
+            for _ in poll_until_ready(
+                engine, timeout=LOAD_WAIT_S, ping_s=STREAM_PING_S,
+            ):
+                yield _event("ping", {"type": "ping"})
+        ids = _tokenize(engine, req)
+    except EngineNotReady as exc:
+        yield _event("error", {
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": str(exc)},
+        })
+        return
+    except ValueError as exc:
+        yield _event("error", {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": str(exc)},
+        })
+        return
+    yield from _stream_body(engine, ids, sampling)
+
+
+def _stream_body(engine, ids, sampling):
     yield _event("content_block_start", {
         "type": "content_block_start",
         "index": 0,

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from slotbank.load import EngineNotReady
 from slotbank.prompt import enforce_prompt_cap
 from slotbank.types import SamplingParams
 
@@ -92,6 +93,14 @@ def _prompt_too_long(exc: ValueError) -> JSONResponse:
     )
 
 
+def _not_ready(exc: EngineNotReady) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": str(exc), "type": "overloaded_error"}},
+        503,
+        headers={"Retry-After": "15"},
+    )
+
+
 def models_payload(engine) -> dict[str, Any]:
     """OpenAI ``GET /v1/models`` plus llama.cpp native fields OMP 18 parses."""
     ctx = int(getattr(engine, "context_window", 16384) or 16384)
@@ -136,6 +145,8 @@ def register_chat(app: FastAPI, engine) -> None:
             # A base model with no chat template is a client error, not a 500.
             # /v1/messages and /v1/responses already guard this.
             ids = engine.tokenize_chat(req.messages, _tools(req))
+        except EngineNotReady as exc:
+            return _not_ready(exc)
         except ValueError as exc:
             return _prompt_too_long(exc)
         sampling = _sampling(req)
@@ -175,6 +186,8 @@ def register_chat(app: FastAPI, engine) -> None:
                 ids = enforce_prompt_cap([int(x) for x in req.prompt])
             else:
                 ids = engine.tokenize_text(req.prompt)
+        except EngineNotReady as exc:
+            return _not_ready(exc)
         except ValueError as exc:
             return _prompt_too_long(exc)
         sampling = _sampling(req)
