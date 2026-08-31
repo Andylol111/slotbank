@@ -210,7 +210,7 @@ def test_overlong_prompt_is_http_400(monkeypatch):
     )
     assert claude.status_code == 400
     assert "32 tokens" in claude.json()["error"]["message"]
-    assert "omp --tools read" in claude.json()["error"]["message"]
+    assert "omp --no-tools" in claude.json()["error"]["message"]
 
     openai = c.post(
         "/v1/chat/completions",
