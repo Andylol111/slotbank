@@ -44,6 +44,49 @@ def test_models_list_matches_omp_discovery():
     assert "anthropic" in row["supported_endpoint_types"]
     assert "openai" in row["supported_endpoint_types"]
     assert row["max_model_len"] == 16384
+    assert row["meta"]["n_ctx"] == 16384
+
+
+def test_llama_cpp_native_discovery_skips_auth(monkeypatch):
+    monkeypatch.delenv("SLOTBANK_VISION", raising=False)
+    c = _client()
+    models = c.get("/models")
+    assert models.status_code == 200
+    body = models.json()
+    assert body["data"][0]["id"] == "toy"
+    assert body["data"][0]["meta"]["n_ctx"] == 16384
+    assert body["data"][0]["architecture"]["input_modalities"] == ["text"]
+    assert c.get("/v1/models").json()["data"][0]["id"] == "toy"
+    props = c.get("/props")
+    assert props.status_code == 200
+    p = props.json()
+    assert p["n_ctx"] == 16384
+    assert p["default_generation_settings"]["n_ctx"] == 16384
+    assert p["default_generation_settings"]["params"]["max_tokens"] == -1
+    assert p["default_generation_settings"]["params"]["n_predict"] == -1
+    assert p["modalities"]["vision"] is False
+
+
+def test_health_reports_loading():
+    from slotbank.api.app import EngineProxy, LoadingEngine, create_app
+    from fastapi.testclient import TestClient
+
+    loading = LoadingEngine("Qwen3.8-27B-4bit")
+    client = TestClient(create_app(loading))
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "loading"
+    assert r.json()["model"] == "Qwen3.8-27B-4bit"
+    # OMP 18 probes GET /models in 250 ms while weights are still loading.
+    listed = client.get("/models")
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["id"] == "Qwen3.8-27B-4bit"
+    assert client.get("/props").status_code == 200
+    proxy = EngineProxy(LoadingEngine("a"))
+    assert proxy.model_id == "a"
+    proxy.replace(FakeEngine())
+    assert proxy.model_id == "toy"
+    assert not getattr(proxy, "loading", False)
 
 
 def test_chat_requires_key():
