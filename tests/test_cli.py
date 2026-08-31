@@ -176,6 +176,27 @@ def test_serve_help_lists_draft(capsys):
     assert "--direct" in out
 
 
+def test_tps_help_and_catalog(capsys, tmp_path, monkeypatch):
+    from slotbank.cli import main
+
+    monkeypatch.setenv("SLOTBANK_TPS_LOG", str(tmp_path / "tps.jsonl"))
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    assert "tps" in capsys.readouterr().out
+    rc = main(["tps"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sidecar-mtp-k3" in out
+    assert "adopted" in out
+    assert "mtp-plus-dflash" in out
+    rc = main(["tps", "--log"])
+    assert rc == 0
+    log_out = capsys.readouterr().out
+    assert "sidecar-mtp-k3" in log_out
+    assert "13.47" in log_out
+
+
 def test_apply_tuning_sets_draft_env(monkeypatch, tmp_path):
     import argparse
     import os

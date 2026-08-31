@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
             "  slotbank run <model>              chat with it\n"
             "  slotbank serve --model <model>    serve it to Claude Code / Codex / OMP\n"
             "  slotbank context                  session log + compiled working set\n"
+            "  slotbank tps                      what was tried for 27B tok/s\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -119,6 +120,16 @@ def main(argv: list[str] | None = None) -> int:
     cxc.add_argument("--repo", default=None, help="repo root for file: pointers")
     cxc.add_argument("--budget", type=int, default=None, help="token budget (default 4096)")
 
+    tps = sub.add_parser(
+        "tps",
+        help="speculative-decode attempt catalog (what was tried, what is daily)",
+    )
+    tps.add_argument(
+        "--log",
+        action="store_true",
+        help="print the machine-local JSONL instead of the catalog",
+    )
+
     args = p.parse_args(argv)
     if not args.cmd:
         # A bare `slotbank` enters the interactive shell when there is a
@@ -154,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
             return _admit(args)
         if args.cmd == "context":
             return _context(args)
+        if args.cmd == "tps":
+            return _tps(args)
         if args.cmd == "generate":
             return _generate(args)
         return _serve(args)
@@ -1040,6 +1053,29 @@ def _admit(args) -> int:
     if not result.ok and card.stored_bytes > (14 << 30):
         print("hint: 4-bit 27B on 24 GB needs --leave-free 6g (18 GiB working set)")
     return 0 if result.ok else 1
+
+
+def _tps(args) -> int:
+    from slotbank.tps import STRATEGIES, seed_local_log, read_attempts, daily_draft
+
+    path = seed_local_log()
+    if getattr(args, "log", False):
+        rows = read_attempts()
+        if not rows:
+            print(f"no attempts in {path}")
+            return 0
+        for rec in rows:
+            toks = rec.get("toks")
+            extra = f" {toks:.2f} tok/s" if isinstance(toks, (int, float)) else ""
+            print(f"{rec['id']:28} {rec['outcome']:10}{extra}")
+        print(f"\n{len(rows)} rows in {path}")
+        return 0
+    print(f"daily --draft route: {daily_draft()}")
+    print(f"{'ID':28} {'STATUS':10} SUMMARY")
+    for s in STRATEGIES:
+        print(f"{s.id:28} {s.status:10} {s.summary}")
+    print(f"\nlocal log: {path}")
+    return 0
 
 
 def _context(args) -> int:
