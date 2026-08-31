@@ -149,7 +149,7 @@ def test_encode_chat_refuses_overlong_prompt(monkeypatch):
 
     with pytest.raises(ValueError, match="prompt is 32 tokens \\(cap 8\\)"):
         encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
-    with pytest.raises(ValueError, match="tools, MCP"):
+    with pytest.raises(ValueError, match="omp --tools read"):
         encode_text(Tok(), "hi")
 
 
@@ -170,7 +170,7 @@ def test_encode_chat_cap_zero_disables(monkeypatch):
     assert len(encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)) == 20000
 
 
-def test_encode_chat_default_cap_is_16k(monkeypatch):
+def test_encode_chat_default_cap_is_8k(monkeypatch):
     from slotbank.prompt import DEFAULT_MAX_PROMPT_TOKENS, encode_chat
 
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
@@ -187,10 +187,11 @@ def test_encode_chat_default_cap_is_16k(monkeypatch):
         def encode(self, text):
             return list(range(self.n))
 
+    assert DEFAULT_MAX_PROMPT_TOKENS == 8192
     assert len(encode_chat(
         Tok(DEFAULT_MAX_PROMPT_TOKENS), [{"role": "user", "content": "hi"}], None,
     )) == DEFAULT_MAX_PROMPT_TOKENS
-    with pytest.raises(ValueError, match="16385 tokens"):
+    with pytest.raises(ValueError, match="8193 tokens"):
         encode_chat(
             Tok(DEFAULT_MAX_PROMPT_TOKENS + 1),
             [{"role": "user", "content": "hi"}], None,

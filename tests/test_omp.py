@@ -91,6 +91,7 @@ def test_render_provider_is_current_omp_schema():
     assert "reasoning: true" in text
     assert "reasoning: false" in text
     assert "input: [text, image]" in text
+    assert "streamIdleTimeoutMs: 600000" in text
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
     llama = render_provider(
         model_id="Qwen3.8-27B-4bit", thinking=True, vision=True,
@@ -99,6 +100,7 @@ def test_render_provider_is_current_omp_schema():
     assert "  llama.cpp:" in llama
     assert "api: openai-completions" in llama
     assert "thinkingFormat: qwen-chat-template" in llama
+    assert "streamIdleTimeoutMs: 600000" in llama
     assert "discovery:" not in llama
 
 

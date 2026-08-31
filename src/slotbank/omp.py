@@ -155,10 +155,13 @@ def _model_entry(
         f"        contextWindow: {int(context_window)}",
         f"        maxTokens: {int(max_tokens)}",
         f"        supportsTools: {'true' if tools else 'false'}",
+        "        compat:",
+        # OMP 18 only treats pings as liveness for 3× this window. 27B prefill
+        # of a few thousand tokens needs minutes, not the default ~60s abort.
+        "          streamIdleTimeoutMs: 600000",
     ])
     if api == "openai-completions":
         lines.extend([
-            "        compat:",
             "          thinkingFormat: qwen-chat-template",
             "          supportsReasoningParams: true",
         ])
