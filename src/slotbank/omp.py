@@ -51,6 +51,10 @@ def selector(model_id: str) -> str:
     return f"{LLAMA_PROVIDER}/{model_id}"
 
 
+def agent_selector(model_id: str) -> str:
+    return selector(f"{model_id}-agent")
+
+
 def lm_studio_selector(model_id: str) -> str:
     return f"{LM_STUDIO_PROVIDER}/{model_id}"
 
@@ -85,9 +89,6 @@ def render_provider(
     caches an empty list across F5.
     """
     base = f"http://{host}:{int(port)}/v1"
-    inputs = "[text, image]" if vision else "[text]"
-    name = f"{model_id} (slotbank)"
-    reason = "true" if thinking else "false"
     lines = [
         f"  {provider_id}:",
         f"    baseUrl: {base}",
@@ -101,12 +102,46 @@ def render_provider(
             f"      type: {discovery}",
             "      timeoutMs: 30000",
         ])
-    lines.extend([
-        "    models:",
+    lines.append("    models:")
+    lines.extend(_model_entry(
+        model_id=model_id,
+        thinking=False,
+        vision=vision,
+        context_window=context_window,
+        max_tokens=max_tokens,
+        tools=False,
+        api=api,
+    ))
+    lines.extend(_model_entry(
+        model_id=f"{model_id}-agent",
+        thinking=thinking,
+        vision=vision,
+        context_window=context_window,
+        max_tokens=max_tokens,
+        tools=True,
+        api=api,
+    ))
+    return "\n".join(lines) + "\n"
+
+
+def _model_entry(
+    *,
+    model_id: str,
+    thinking: bool,
+    vision: bool,
+    context_window: int,
+    max_tokens: int,
+    tools: bool,
+    api: str,
+) -> list[str]:
+    inputs = "[text, image]" if vision else "[text]"
+    name = f"{model_id} (slotbank)"
+    reason = "true" if thinking else "false"
+    lines = [
         f"      - id: {_y(model_id)}",
         f"        name: {_y(name)}",
         f"        reasoning: {reason}",
-    ])
+    ]
     if thinking:
         lines.extend([
             "        thinking:",
@@ -119,7 +154,7 @@ def render_provider(
         "        tokenizer: qwen3",
         f"        contextWindow: {int(context_window)}",
         f"        maxTokens: {int(max_tokens)}",
-        "        supportsTools: true",
+        f"        supportsTools: {'true' if tools else 'false'}",
     ])
     if api == "openai-completions":
         lines.extend([
@@ -127,7 +162,7 @@ def render_provider(
             "          thinkingFormat: qwen-chat-template",
             "          supportsReasoningParams: true",
         ])
-    return "\n".join(lines) + "\n"
+    return lines
 
 
 def render_managed_providers(**kwargs) -> str:

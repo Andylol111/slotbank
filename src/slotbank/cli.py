@@ -457,7 +457,7 @@ def _generate(args) -> int:
 
 def _omp(args) -> int:
     from slotbank.admit import public_model_id
-    from slotbank.omp import lm_studio_selector, selector, upsert
+    from slotbank.omp import agent_selector, lm_studio_selector, selector, upsert
 
     path = None
     try:
@@ -475,11 +475,12 @@ def _omp(args) -> int:
         vision=bool(getattr(args, "vision", False)),
     )
     print(f"wrote {written}")
-    print(f"picker: {selector(mid)}")
+    print(f"picker: {selector(mid)}          (no tools; fast hi)")
+    print(f"agent:  {agent_selector(mid)}  (tools + thinking)")
     print(f"also:   {lm_studio_selector(mid)}")
     print("then:   omp models refresh")
-    print("        (F5 in /model keeps a cached empty list)")
-    print("look under llama.cpp or lm-studio, not the cloud catalog")
+    print("        start omp from ~ or /tmp, not this repo")
+    print("        (cwd ~/Desktop/slotbank dumps README+src into the prompt)")
     return 0
 
 
@@ -490,7 +491,7 @@ def _serve(args) -> int:
 
     from slotbank.admit import public_model_id
     from slotbank.api.app import EngineProxy, LoadingEngine, create_app
-    from slotbank.omp import lm_studio_selector, selector, upsert
+    from slotbank.omp import agent_selector, lm_studio_selector, selector, upsert
     from slotbank.registry import local_path, resolve
 
     repo = resolve(args.model)
@@ -520,11 +521,12 @@ def _serve(args) -> int:
     omp_lines = ""
     if omp_path is not None:
         omp_lines = (
-            f"\n  OMP picker                 {selector(mid)}\n"
+            f"\n  OMP picker                 {selector(mid)}  (no tools; fast hi)\n"
+            f"  OMP agent                  {agent_selector(mid)}\n"
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
-            f"                             (F5 in /model keeps a cached empty list)"
+            f"  cwd                        start omp from ~ or /tmp, not this repo"
         )
     proxy = EngineProxy(LoadingEngine(mid))
     app = create_app(proxy, api_key=args.api_key)
