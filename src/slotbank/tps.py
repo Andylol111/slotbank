@@ -187,8 +187,19 @@ STRATEGIES: tuple[Strategy, ...] = (
         "Closest in-tree: 8-bit KV when not drafting (KIVI residual is a comment, "
         "not code), context OS, append-only suffix. vLLM/SGLang hybrid managers "
         "separate a GDN pool from a KV pool — they still do not Pyramid the "
-        "recurrent state.",
+        "recurrent state. The iGPU analogue is igpu-pyramid-tiles (prompt pack + "
+        "Metal tiles), not these kernels.",
         needs_trim_cache=True,
+    ),
+    Strategy(
+        "igpu-pyramid-tiles",
+        IN_TREE,
+        "Pyramid/BUZZ/TriAttention analogue on prompt ids + prefill tiles.",
+        "Does not evict or recode hybrid KV. keep_token_ids (SLOTBANK_PROMPT_PACK=1) "
+        "keeps a sink prefix, a dense-early middle, and the tail. _pyramid_step "
+        "sizes chunk×(offset+chunk) so early Metal tiles stay large. Daily "
+        "--draft still uses conservative _adaptive_step because mlx-vlm takes "
+        "one chunk size. Default pack is off: overlong OMP dumps still 400.",
     ),
     Strategy(
         "hybrid-kv-dynamic-page",

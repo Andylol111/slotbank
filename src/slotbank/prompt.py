@@ -119,7 +119,73 @@ def max_prompt_tokens() -> int:
     return n
 
 
+def _prompt_pack_on() -> bool:
+    return os.environ.get("SLOTBANK_PROMPT_PACK", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _pyramid_sample(src: list[int], k: int) -> list[int]:
+    """Keep k tokens from src, denser at the start, order preserved."""
+    n = len(src)
+    if k <= 0:
+        return []
+    if n <= k:
+        return list(src)
+    seen: set[int] = set()
+    picked: list[int] = []
+    den = (k - 1) * (k - 1) if k > 1 else 1
+    for t in range(k):
+        idx = 0 if k == 1 else (t * t * (n - 1)) // den
+        if idx not in seen:
+            seen.add(idx)
+            picked.append(idx)
+    if len(picked) < k:
+        for i in range(n):
+            if i not in seen:
+                seen.add(i)
+                picked.append(i)
+                if len(picked) == k:
+                    break
+    picked.sort()
+    return [src[i] for i in picked]
+
+
+def keep_token_ids(ids: list[int], cap: int) -> list[int]:
+    """Pack an overlong prompt without touching hybrid KV.
+
+    Head is the attention sink / system prefix. Tail is the current turn.
+    The middle is a one-shot pyramidal sample (dense near the head). This is
+    the PyramidKV + BUZZ + TriAttention idea applied to *what gets prefills*,
+    not to Gated DeltaNet state.
+    """
+    n = len(ids)
+    if n <= cap or cap <= 0:
+        return list(ids)
+    head_n = max(1, cap * 2 // 10)
+    tail_n = max(1, cap * 5 // 10)
+    if head_n + tail_n > cap:
+        tail_n = min(cap, max(1, cap - 1))
+        head_n = cap - tail_n
+    mid_n = cap - head_n - tail_n
+    if head_n + tail_n >= n:
+        return ids[:head_n] + ids[n - (cap - head_n) :]
+    head = ids[:head_n]
+    tail = ids[-tail_n:]
+    mid = _pyramid_sample(ids[head_n : n - tail_n], mid_n)
+    return head + mid + tail
+
+
+def maybe_pack_prompt(ids: list[int]) -> list[int]:
+    """SLOTBANK_PROMPT_PACK=1: keep sink+pyramid+tail instead of HTTP 400."""
+    cap = max_prompt_tokens()
+    if not cap or len(ids) <= cap or not _prompt_pack_on():
+        return ids
+    return keep_token_ids(ids, cap)
+
+
 def enforce_prompt_cap(ids: list[int]) -> list[int]:
+    ids = maybe_pack_prompt(ids)
     cap = max_prompt_tokens()
     if cap and len(ids) > cap:
         raise ValueError(
@@ -128,7 +194,8 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
             "OMP footer `/tmp ↳ name` means a git repo that is a *child* of cwd "
             "was injected (e.g. /tmp/llama.cpp-dflash2). "
             "mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools. "
-            "Override: SLOTBANK_MAX_PROMPT=0"
+            "Override: SLOTBANK_MAX_PROMPT=0 "
+            "or SLOTBANK_PROMPT_PACK=1 to keep head+tail and sample the middle."
         )
     return ids
 
