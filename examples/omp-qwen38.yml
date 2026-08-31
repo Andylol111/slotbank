@@ -1,7 +1,7 @@
 # Oh My Pi (OMP) → slotbank Anthropic Messages door.
-# 4-bit + native MTP (trained K=3). Cool A/B 2026-08-31: MTP 13.47/9.95 tok/s
-# vs DFlash2 K=8 11.76/9.10 (count / parse_iso_dates), same greedy prefix.
-# Thinking + vision + --direct stay on the model.
+# 4-bit + native MTP (trained K=3). OMP/Anthropic default temperature is 1.0
+# (thinking samples). Greedy 13.47/9.95 was a temp-0 bench, not this door.
+# Qwen3.5-4B+DFlash is a separate ~46–54 tok/s model, not a 27B drafter.
 #   PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
 #     --model ~/Models/Qwen3.8-27B-4bit \
 #     --draft ~/Models/Qwen3.8-27B-MTP-4bit \

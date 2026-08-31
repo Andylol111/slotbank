@@ -655,6 +655,18 @@ class Runtime:
         self._draft = draft
         self._draft_kind = resolved
 
+    def draft_report(self) -> tuple[str | None, int | None, float | None]:
+        """Last-round drafter kind, K, and accept rate. None without a draft."""
+        if self._draft is None:
+            return None, None, None
+        from slotbank.tps import draft_accept_rate
+
+        rate = draft_accept_rate(
+            getattr(self._draft, "accept_lens", None),
+            getattr(self._draft, "draft_lens", None),
+        )
+        return self._draft_kind, self._draft_block, rate
+
     def _raise_wired_limit(self, model=None) -> int:
         """Wire model bytes plus slop, not the whole working set.
 

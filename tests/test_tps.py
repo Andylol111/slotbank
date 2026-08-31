@@ -31,7 +31,8 @@ def test_catalog_sound():
     assert get("sliding-window-kv").status == REJECTED
     assert get("mtplx-engine").status != ADOPTED
     assert get("tree-medusa-eagle").status != ADOPTED
-    assert get("harness-structure-for-tps").status == REJECTED
+    assert get("harness-temp-1").status == ADOPTED
+    assert get("qwen35-4b-as-27b-drafter").status == REJECTED
     assert len(STRATEGIES) >= 10
 
 
@@ -116,3 +117,18 @@ def test_retune_draft_block_shrinks_on_low_accept(monkeypatch):
     rt._draft_block = 3
     rt._retune_draft_block()
     assert rt._draft_block == 3
+
+
+def test_draft_report_empty_without_drafter():
+    from types import SimpleNamespace
+
+    from slotbank.runtime import Runtime
+
+    rt = Runtime(SimpleNamespace(model_path="x", prefill_step_size=512))
+    assert rt.draft_report() == (None, None, None)
+    rt._draft = SimpleNamespace(accept_lens=[2, 3], draft_lens=[3, 3])
+    rt._draft_kind = "mtp"
+    rt._draft_block = 3
+    kind, block, rate = rt.draft_report()
+    assert kind == "mtp" and block == 3
+    assert rate == pytest.approx(5 / 6)

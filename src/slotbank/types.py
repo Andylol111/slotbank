@@ -43,6 +43,9 @@ class GenResult:
     matched_stop: str | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    draft_kind: str | None = None
+    draft_block: int | None = None
+    draft_accept_rate: float | None = None
 
 
 class RuntimeProtocol(Protocol):
