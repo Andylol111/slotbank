@@ -174,6 +174,8 @@ def test_serve_help_lists_draft(capsys):
     assert "--draft" in out and "DFlash" in out
     assert "--thinking" in out and "--vision" in out
     assert "--direct" in out
+    assert "--no-omp" in out
+    assert "--no-draft" in out
 
 
 def test_tps_help_and_catalog(capsys, tmp_path, monkeypatch):
@@ -183,7 +185,9 @@ def test_tps_help_and_catalog(capsys, tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         main(["--help"])
     assert exc.value.code == 0
-    assert "tps" in capsys.readouterr().out
+    help_out = capsys.readouterr().out
+    assert "tps" in help_out
+    assert "omp" in help_out
     rc = main(["tps"])
     assert rc == 0
     out = capsys.readouterr().out

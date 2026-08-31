@@ -1,11 +1,29 @@
 # Oh My Pi (OMP) → slotbank Anthropic Messages door.
 # 30+ tok/s path (Qwen3.5-4B 4-bit). Draft is optional: raw already ~33 tok/s.
+# This is a different model from the 27B, not a 27B drafter.
 #   PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
 #     --model ~/Models/Qwen3.5-4B-4bit \
 #     --draft ~/Models/Qwen3.5-4B-DFlash-4bit
-# Then copy this provider into ~/.omp/agent/models.yml.
+# `slotbank serve` writes ~/.omp/agent/models.yml. Selector: slotbank/Qwen3.5-4B-4bit
 providers:
-  slotbank-qwen35-4b:
-    type: anthropic
-    base_url: http://127.0.0.1:8080
-    model: Qwen3.5-4B-4bit
+  slotbank:
+    baseUrl: http://127.0.0.1:8080/v1
+    api: anthropic-messages
+    auth: none
+    disableStrictTools: true
+    discovery:
+      type: openai-models-list
+      timeoutMs: 2000
+    models:
+      - id: Qwen3.5-4B-4bit
+        name: Qwen3.5-4B-4bit (slotbank)
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [low, medium, high, xhigh]
+          defaultLevel: high
+        input: [text]
+        tokenizer: qwen3
+        contextWindow: 32768
+        maxTokens: 8192
+        supportsTools: true

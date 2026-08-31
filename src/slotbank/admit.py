@@ -51,6 +51,119 @@ def _first_int(*values: Any) -> int:
 
 
 _HEXISH = re.compile(r"^[0-9a-f]{16,}$", re.I)
+_SKIP_ID_PARTS = frozenset({
+    "snapshots", "refs", "blobs", "hub", "models", ".cache",
+    "huggingface", "huggingface_hub",
+})
+
+
+def public_model_id(model_path: str) -> str:
+    """Stable id for /v1/models and the OMP picker.
+
+    An HF snapshot directory is a commit hash; OMP cannot match that against a
+    folder name the user typed. Walk up past ``snapshots/<hex>`` and
+    ``models--owner--Name`` cache folders. Repo ids ``owner/Name`` keep ``Name``.
+    """
+    raw = str(model_path or "").strip().rstrip("/\\")
+    if not raw:
+        return "model"
+    expanded = os.path.expanduser(raw)
+    looks_repo = (
+        "/" in raw
+        and not raw.startswith(("/", ".", "~"))
+        and not os.path.isdir(expanded)
+    )
+    if looks_repo:
+        name = raw.split("/")[-1].strip()
+        return name or "model"
+    p = Path(expanded)
+    try:
+        p = p.resolve()
+    except OSError:
+        p = Path(expanded)
+    for part in reversed(p.parts):
+        if part in _SKIP_ID_PARTS or part in {os.sep, "/", "\\", ".", ".."}:
+            continue
+        if len(part) == 2 and part.endswith(":"):
+            continue
+        if _HEXISH.match(part):
+            continue
+        if part.startswith("models--"):
+            bits = [b for b in part.split("--") if b]
+            return bits[-1] if bits else part
+        return part
+    return Path(raw).name or "model"
+
+
+def _sidecar_names(model_id: str) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    base = model_id[:-5] if model_id.endswith("-4bit") else model_id
+    add(f"{base}-MTP-4bit")
+    add(f"{base}-mtp-4bit")
+    add(f"{base}-DFlash2-4bit")
+    add(f"{base}-DFlash-4bit")
+    add(f"{base}-dflash2-4bit")
+    add(f"{model_id}-MTP-4bit")
+    return names
+
+
+def _draft_rank(cfg: dict[str, Any]) -> int:
+    t = str(cfg.get("model_type") or "").lower()
+    if "mtp" in t:
+        return 3
+    if "dflash" in t or cfg.get("dflash_config") is not None:
+        return 2
+    if "eagle" in t:
+        return 1
+    return 0
+
+
+def discover_sidecar_draft(model_path: str) -> str | None:
+    """Sibling MTP (preferred) or DFlash pack that can draft this target.
+
+    Same 27B weights; mlx-vlm verify is unchanged. None when there is no
+    compatible folder next to the model.
+    """
+    root = Path(os.path.expanduser(model_path))
+    if not root.is_dir():
+        return None
+    try:
+        root_res = root.resolve()
+    except OSError:
+        root_res = root
+    parent = root.parent
+    ranked: list[tuple[int, str]] = []
+    for name in _sidecar_names(public_model_id(str(root))):
+        cand = parent / name
+        if not cand.is_dir():
+            continue
+        try:
+            if cand.resolve() == root_res:
+                continue
+        except OSError:
+            continue
+        if not (cand / "config.json").is_file():
+            continue
+        if not any(cand.glob("*.safetensors")):
+            continue
+        why = check_draft_compatible(str(root), str(cand))
+        if why:
+            continue
+        rank = _draft_rank(load_hf_config(str(cand)))
+        if rank <= 0:
+            continue
+        ranked.append((rank, str(cand)))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda row: -row[0])
+    return ranked[0][1]
 
 
 def _params_from_name(name: str) -> int | None:

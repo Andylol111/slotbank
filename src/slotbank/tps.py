@@ -246,6 +246,21 @@ STRATEGIES: tuple[Strategy, ...] = (
         extra_drafter=True,
         changes_target_weights=True,
     ),
+    Strategy(
+        "omp-models-yml",
+        ADOPTED,
+        "Write current-schema ~/.omp/agent/models.yml on serve so OMP lists the 27B.",
+        "Old examples used type: anthropic / base_url; one invalid custom file disables "
+        "all custom providers. OMP's implicit llama.cpp probe hits :8080/models, not "
+        "/v1/models. Static provider slotbank + folder-name id is the picker entry.",
+    ),
+    Strategy(
+        "auto-sidecar-mtp",
+        ADOPTED,
+        "If --draft is omitted, attach a sibling MTP-4bit (else DFlash) that admits.",
+        "Serve without --draft was greedy 5.71 tok/s. Same 27B weights; mlx-vlm verify.",
+        extra_drafter=True,
+    ),
 )
 
 

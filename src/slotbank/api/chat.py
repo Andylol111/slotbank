@@ -80,6 +80,7 @@ def _openai_tools(calls) -> list[dict[str, Any]]:
 def register_chat(app: FastAPI, engine) -> None:
     @app.get("/v1/models")
     def models():
+        ctx = int(getattr(engine, "context_window", 16384) or 16384)
         return {
             "object": "list",
             "data": [{
@@ -87,6 +88,9 @@ def register_chat(app: FastAPI, engine) -> None:
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "slotbank",
+                "supported_endpoint_types": ["anthropic", "openai"],
+                "max_model_len": ctx,
+                "context_length": ctx,
             }],
         }
 
