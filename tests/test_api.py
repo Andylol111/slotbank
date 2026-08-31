@@ -89,6 +89,62 @@ def test_health_reports_loading():
     assert not getattr(proxy, "loading", False)
 
 
+def test_loading_chat_is_503_not_400():
+    from fastapi.testclient import TestClient
+
+    from slotbank.api.app import LoadingEngine, create_app
+
+    c = TestClient(create_app(LoadingEngine("Qwen3.8-27B-4bit"), api_key="k"))
+    headers = {"x-api-key": "k", "Authorization": "Bearer k"}
+    body = {"model": "toy", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+    r = c.post("/v1/messages", headers=headers, json=body)
+    assert r.status_code == 503
+    assert r.json()["error"]["type"] == "overloaded_error"
+    assert "still loading" in r.json()["error"]["message"]
+    assert r.headers.get("retry-after") == "15"
+    chat = c.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "toy", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert chat.status_code == 503
+    assert chat.json()["error"]["type"] == "overloaded_error"
+
+
+def test_anthropic_stream_waits_out_loading(monkeypatch):
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import slotbank.api.messages as messages
+    from slotbank.api.app import EngineProxy, LoadingEngine, create_app
+
+    monkeypatch.setattr(messages, "STREAM_PING_S", 0.05)
+    monkeypatch.setattr(messages, "LOAD_WAIT_S", 2.0)
+    proxy = EngineProxy(LoadingEngine("toy"))
+
+    def boot() -> None:
+        time.sleep(0.12)
+        proxy.replace(FakeEngine())
+
+    threading.Thread(target=boot, daemon=True).start()
+    r = TestClient(create_app(proxy, api_key="k")).post(
+        "/v1/messages",
+        headers={"x-api-key": "k"},
+        json={
+            "model": "toy",
+            "max_tokens": 16,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert r.status_code == 200
+    assert "event: ping" in r.text
+    assert "text_delta" in r.text
+    assert "message_stop" in r.text
+
+
 def test_chat_requires_key():
     c = _client()
     assert c.post("/v1/chat/completions", json={"model": "toy", "messages": [{"role": "user", "content": "x"}]}).status_code == 401
@@ -154,7 +210,7 @@ def test_overlong_prompt_is_http_400(monkeypatch):
     )
     assert claude.status_code == 400
     assert "32 tokens" in claude.json()["error"]["message"]
-    assert "slotbank checkout" in claude.json()["error"]["message"]
+    assert "tools, MCP" in claude.json()["error"]["message"]
 
     openai = c.post(
         "/v1/chat/completions",

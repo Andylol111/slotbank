@@ -189,6 +189,7 @@ def test_cli_omp_writes_yml(tmp_path, monkeypatch, capsys):
     assert "llama.cpp/Qwen3.8-27B-4bit-agent" in out
     assert "no tools" in out
     assert "not this repo" in out
+    assert "--tools read" in out
     assert dest.is_file()
     text = dest.read_text()
     assert "  llama.cpp:" in text

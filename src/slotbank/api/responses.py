@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from slotbank.load import EngineNotReady
 from slotbank.prompt import _text_of
 from slotbank.types import SamplingParams
 
@@ -121,6 +122,11 @@ def register_responses(app: FastAPI, engine) -> None:
         try:
             chat = to_chat_messages(req)
             ids = engine.tokenize_chat(chat, to_openai_tools(req.tools, req.tool_choice))
+        except EngineNotReady as exc:
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "overloaded_error", "code": "overloaded"}},
+                503,
+            )
         except ValueError as exc:
             return _err(400, str(exc))
         sampling = SamplingParams(

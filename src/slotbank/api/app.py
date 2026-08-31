@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from slotbank.api.chat import llama_props_payload, models_payload, register_chat
 from slotbank.api.messages import register_messages
 from slotbank.api.responses import register_responses
+from slotbank.load import EngineNotReady
 
 _OPEN_PATHS = frozenset({
     "/health", "/", "/models", "/props", "/v1/models",
@@ -25,19 +26,22 @@ class LoadingEngine:
     def _busy(self) -> str:
         if self.load_error:
             return self.load_error
-        return f"slotbank is still loading {self.model_id}"
+        return (
+            f"slotbank is still loading {self.model_id}. "
+            "Wait until the serve terminal prints 'ready', then resend."
+        )
 
     def tokenize_chat(self, messages, tools):
-        raise ValueError(self._busy())
+        raise EngineNotReady(self._busy())
 
     def tokenize_text(self, text):
-        raise ValueError(self._busy())
+        raise EngineNotReady(self._busy())
 
     def generate(self, ids, sampling, on_token=None):
-        raise ValueError(self._busy())
+        raise EngineNotReady(self._busy())
 
     def stream(self, ids, sampling):
-        raise ValueError(self._busy())
+        raise EngineNotReady(self._busy())
         yield from ()  # pragma: no cover — generator for type checkers
 
 
