@@ -581,6 +581,7 @@ class Runtime:
         self._draft = None
         self._draft_kind = "dflash"
         self._draft_block = None
+        self._draft_cap = None
         self._dflash_cache = None
 
     @property
@@ -630,12 +631,15 @@ class Runtime:
         path = str(Path(path).expanduser())
         kind = os.environ.get("SLOTBANK_DRAFT_KIND", "").strip() or None
         block = os.environ.get("SLOTBANK_DRAFT_BLOCK", "").strip()
+        from slotbank.admit import draft_block_from_config
+
+        trained = draft_block_from_config(path)
         if block:
             self._draft_block = int(block)
+            self._draft_cap = int(block)
         else:
-            from slotbank.admit import draft_block_from_config
-
-            self._draft_block = draft_block_from_config(path)
+            self._draft_block = trained
+            self._draft_cap = trained
         from mlx_vlm.speculative.drafters import (
             load_drafter,
             validate_drafter_compatibility,
@@ -1054,6 +1058,30 @@ class Runtime:
             self._dflash_cache = None
             self._fed_ids = []
             raise
+        finally:
+            self._retune_draft_block()
+
+    def _retune_draft_block(self) -> None:
+        """Move K by 1 from last-round accept. Never past the trained/user cap."""
+        import os
+
+        if self._draft is None or self._draft_cap is None:
+            return
+        if os.environ.get("SLOTBANK_DAIS", "1").strip().lower() in {
+            "0", "false", "no", "off",
+        }:
+            return
+        from slotbank.tps import draft_accept_rate, scale_draft_block
+
+        rate = draft_accept_rate(
+            getattr(self._draft, "accept_lens", None),
+            getattr(self._draft, "draft_lens", None),
+        )
+        self._draft_block = scale_draft_block(
+            cap=int(self._draft_cap),
+            accept_rate=rate,
+            current=self._draft_block,
+        )
 
     def step(self) -> GenerationStep:
         import mlx.core as mx
