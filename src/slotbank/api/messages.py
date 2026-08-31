@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import uuid
 from typing import Any
 
@@ -204,6 +206,38 @@ def _event(name: str, data: dict) -> str:
     return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+_DONE = object()
+# OMP aborts Anthropic streams that go silent during 27B prefill. A ping
+# every few seconds is cheaper than a stall after "hi".
+STREAM_PING_S = 5.0
+
+
+def _with_pings(it, timeout: float | None = None):
+    """Yield ``("ping", None)`` when ``it`` is quiet for ``timeout`` seconds."""
+    wait = STREAM_PING_S if timeout is None else float(timeout)
+    q: queue.Queue = queue.Queue()
+
+    def run() -> None:
+        try:
+            for item in it:
+                q.put(item)
+        except Exception as exc:
+            q.put(("err", str(exc)))
+        finally:
+            q.put(_DONE)
+
+    threading.Thread(target=run, daemon=True, name="slotbank-sse-ping").start()
+    while True:
+        try:
+            item = q.get(timeout=wait)
+        except queue.Empty:
+            yield ("ping", None)
+            continue
+        if item is _DONE:
+            return
+        yield item
+
+
 def _stream(engine, ids, sampling, model: str, mid: str):
     yield _event("message_start", {
         "type": "message_start",
@@ -224,7 +258,10 @@ def _stream(engine, ids, sampling, model: str, mid: str):
         "content_block": {"type": "text", "text": ""},
     })
     result = None
-    for kind, payload in engine.stream(ids, sampling):
+    for kind, payload in _with_pings(engine.stream(ids, sampling)):
+        if kind == "ping":
+            yield _event("ping", {"type": "ping"})
+            continue
         if kind == "delta" and payload:
             yield _event("content_block_delta", {
                 "type": "content_block_delta",

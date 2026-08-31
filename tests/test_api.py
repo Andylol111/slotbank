@@ -123,6 +123,44 @@ def test_claude_count_tokens():
     assert r.json()["input_tokens"] == 3
 
 
+def test_anthropic_stream_pings_during_prefill(monkeypatch):
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import slotbank.api.messages as messages
+    from slotbank.api.app import create_app
+    from slotbank.types import GenResult
+
+    monkeypatch.setattr(messages, "STREAM_PING_S", 0.05)
+
+    class SlowEngine:
+        model_id = "toy"
+
+        def tokenize_chat(self, messages, tools):
+            return [1, 2, 3]
+
+        def stream(self, ids, sampling):
+            time.sleep(0.16)
+            yield ("delta", "hi")
+            yield ("result", GenResult(content="hi", prompt_tokens=len(ids), completion_tokens=1))
+
+    r = TestClient(create_app(SlowEngine(), api_key="k")).post(
+        "/v1/messages",
+        headers={"x-api-key": "k"},
+        json={
+            "model": "toy",
+            "max_tokens": 16,
+            "stream": True,
+            "messages": [{"role": "user", "content": "x"}],
+        },
+    )
+    assert r.status_code == 200
+    assert "event: ping" in r.text
+    assert "text_delta" in r.text
+    assert "message_stop" in r.text
+
+
 def test_codex_responses():
     r = _client().post(
         "/v1/responses",

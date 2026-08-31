@@ -21,6 +21,9 @@ from typing import Iterable
 PROVIDER_ID = "slotbank"
 LLAMA_PROVIDER = "llama.cpp"
 LM_STUDIO_PROVIDER = "lm-studio"
+# OMP's agent scaffolding (tools + system) is already >16k. 32k is the
+# documented stretch window on this Air; 16k makes /model usable and "hi" not.
+DEFAULT_CONTEXT_WINDOW = 32768
 BEGIN = "# --- slotbank omp (managed) ---"
 END = "# --- end slotbank omp ---"
 LEGACY_IDS = frozenset({
@@ -69,7 +72,7 @@ def render_provider(
     port: int = 8080,
     thinking: bool = False,
     vision: bool = False,
-    context_window: int = 16384,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
     max_tokens: int = 8192,
     provider_id: str = PROVIDER_ID,
     api: str = "anthropic-messages",
@@ -210,7 +213,7 @@ def compose_models_yml(
     thinking: bool = False,
     vision: bool = False,
     existing: str = "",
-    context_window: int = 16384,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
     max_tokens: int = 8192,
 ) -> str:
     others = kept_providers(existing)
@@ -246,7 +249,7 @@ def upsert(
     thinking: bool = False,
     vision: bool = False,
     path: Path | None = None,
-    context_window: int = 16384,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
     max_tokens: int = 8192,
 ) -> Path:
     dest = path or models_yml_path()
