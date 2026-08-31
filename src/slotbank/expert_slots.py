@@ -25,6 +25,19 @@ _CONTAINER_CLS: dict[type, type] = {}
 _CONTAINER_CALL: dict[type, object] = {}
 
 
+def _model_args(model):
+    """MoE dims live on args. VLMs nest them under language_model."""
+    for obj in (
+        model,
+        getattr(model, "model", None),
+        getattr(model, "language_model", None),
+    ):
+        args = getattr(obj, "args", None)
+        if args is not None:
+            return args
+    return None
+
+
 def _slots_mode() -> str:
     raw = os.environ.get("SLOTBANK_SLOTS", "auto").strip().lower()
     return raw if raw in {"ram", "auto", "full"} else "auto"
@@ -50,9 +63,7 @@ def _capacity_from_model(model, capacity: int | None, um=None) -> int:
             return max(1, int(override))
         except ValueError:
             pass
-    args = getattr(model, "args", None)
-    if args is None:
-        args = getattr(getattr(model, "model", None), "args", None)
+    args = _model_args(model)
     top_k = getattr(args, "num_experts_per_tok", None) if args is not None else None
     n_e = getattr(args, "num_experts", None) if args is not None else None
     floor = DEFAULT_CAPACITY

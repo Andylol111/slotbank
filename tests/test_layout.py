@@ -145,6 +145,9 @@ def test_draft_compatibility_rejects_vocab_mismatch(tmp_path):
     # missing vocab_size must refuse, not guess
     (b / "config.json").write_text(json.dumps({}))
     assert check_draft_compatible(str(a), str(b)) is not None
+    # DFlash2 often omits vocab_size; it emits target token ids
+    (b / "config.json").write_text(json.dumps({"model_type": "dflash2"}))
+    assert check_draft_compatible(str(a), str(b)) is None
 
 
 def test_speculative_check_rejects_untrimmable_cache():
@@ -160,6 +163,103 @@ def test_speculative_check_rejects_untrimmable_cache():
     msg = check_speculative_supported([Trimmable(), Recurrent()])
     assert msg and "not trimmable" in msg and "Recurrent" in msg
     assert check_speculative_supported([]) is not None
+
+
+def test_kv_bytes_per_token_qwen38_hybrid():
+    from slotbank.admit import kv_bytes_per_token, max_context_tokens
+
+    cfg = {
+        "text_config": {
+            "layer_types": ["linear_attention"] * 48 + ["full_attention"] * 16,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+        }
+    }
+    assert kv_bytes_per_token(cfg) == 16 * 4 * 256 * 2 * 2
+    profile = type("P", (), {"max_working_set_bytes": 16 << 30})()
+    card = type("C", (), {"stored_bytes": 13 << 30})()
+    # 16 - 13 - 1 GiB slop = 2 GiB / 64 KiB ≈ 32768
+    assert max_context_tokens(profile, card, cfg) == (2 << 30) // (64 << 10)
+
+
+def test_draft_viable_refuses_hybrid_and_tight_headroom():
+    from slotbank.admit import draft_viable
+    from slotbank.layout import MIN_KV_BYTES
+
+    profile = type("P", (), {"max_working_set_bytes": 16 << 30})()
+    card = type("C", (), {"stored_bytes": 13 << 30})()
+    why = draft_viable(profile, card, "mixed layer_types: full_attention, linear_attention")
+    assert why and "UNSAFE" in why
+    roomy = type("P", (), {"max_working_set_bytes": 64 << 30})()
+    assert draft_viable(roomy, card, None) is None
+    tight = type("C", (), {"stored_bytes": 15 << 30})()
+    why = draft_viable(profile, tight, None)
+    assert why and "headroom" in why
+    assert MIN_KV_BYTES > 0
+    # mlx-vlm DFlash rolls GDN state back; hybrid is allowed when it fits
+    assert draft_viable(
+        profile, card, "mixed layer_types: full_attention, linear_attention",
+        verify="dflash",
+    ) is None
+    why = draft_viable(
+        profile, tight, "mixed layer_types", draft_bytes=2 << 30, verify="dflash",
+    )
+    assert why and "headroom" in why
+
+
+def test_draft_block_from_config_reads_trained_k(tmp_path):
+    from slotbank.admit import draft_block_from_config
+
+    dflash = tmp_path / "dflash"
+    dflash.mkdir()
+    (dflash / "config.json").write_text(
+        '{"dflash_config": {"block_size": 8}, "block_size": 4}'
+    )
+    assert draft_block_from_config(str(dflash)) == 8
+    mtp = tmp_path / "mtp"
+    mtp.mkdir()
+    (mtp / "config.json").write_text('{"model_type": "qwen3_5_mtp", "block_size": 3}')
+    assert draft_block_from_config(str(mtp)) == 3
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "config.json").write_text("{}")
+    assert draft_block_from_config(str(empty)) == 5
+    assert draft_block_from_config(str(tmp_path / "missing")) == 5
+
+
+def test_refuse_draft_if_needed_uses_dflash_verify(tmp_path, monkeypatch):
+    import json
+
+    from slotbank.admit import refuse_draft_if_needed
+
+    tgt, dft = tmp_path / "tgt", tmp_path / "dft"
+    tgt.mkdir(); dft.mkdir()
+    (tgt / "config.json").write_text(json.dumps({
+        "vocab_size": 248320,
+        "text_config": {
+            "vocab_size": 248320,
+            "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+        },
+    }))
+    (dft / "config.json").write_text(json.dumps({"model_type": "dflash2"}))
+    profile = type("P", (), {"max_working_set_bytes": 18 << 30})()
+    card = type("C", (), {"stored_bytes": 16 << 30})()
+    monkeypatch.setenv("SLOTBANK_DRAFT", str(dft))
+    refuse_draft_if_needed(str(tgt), profile, card)
+    tight = type("C", (), {"stored_bytes": 17 << 30})()
+    with pytest.raises(ValueError, match="headroom"):
+        refuse_draft_if_needed(str(tgt), profile, tight)
+    monkeypatch.delenv("SLOTBANK_DRAFT")
+    refuse_draft_if_needed(str(tgt), profile, tight)
+    huge = tmp_path / "bf16"
+    huge.mkdir()
+    (huge / "config.json").write_text(json.dumps({"model_type": "dflash2"}))
+    monkeypatch.setenv("SLOTBANK_DRAFT", str(huge))
+    monkeypatch.setattr(
+        "slotbank.admit.stored_bytes_from_files", lambda p: 3 << 30,
+    )
+    with pytest.raises(ValueError, match="unquantized"):
+        refuse_draft_if_needed(str(tgt), profile, card)
 
 
 def test_hybrid_detected_from_config_without_loading():

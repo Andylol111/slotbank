@@ -27,7 +27,54 @@ def reuse_prefill_start(fed: list[int], ids: list[int]) -> int:
     return n
 
 
-def _model_sources():
+def draft_feed(fed: list[int], ids: list[int], has_cache: bool) -> tuple[int, list[int]]:
+    """Append-only suffix for DFlash. Never trim — hybrid GDN cannot rewind.
+
+    Reuse only when the new prompt starts with every token already in the
+    cache. A shorter shared prefix would need trim_prompt_cache, which is a
+    no-op on ArraysCache and would silently condition on extra tokens.
+    """
+    reuse = reuse_prefill_start(fed, ids) if has_cache and fed else 0
+    if reuse <= 0:
+        return 0, ids
+    feed = ids[reuse:]
+    return (reuse, feed) if feed else (0, ids)
+
+
+def dflash_session_ok(cache, fed_n: int) -> bool:
+    """False when attention-layer offset disagrees with tokens we recorded.
+
+    ArraysCache (Gated DeltaNet) has no offset. If DFlash accepted tokens
+    past EOS, KVCache.offset runs ahead of `_fed_ids`; reusing that cache
+    would condition the next turn on tokens the client never saw.
+    """
+    offs = [
+        int(c.offset)
+        for c in (cache or [])
+        if getattr(c, "offset", None) is not None
+    ]
+    if not offs:
+        return True
+    return min(offs) == max(offs) == fed_n
+
+
+# Architectures mlx-lm has no class for. qwen4_exp is experimental and lives
+# in mlx-vlm git main (2026-08-27+); the others are in the vlm extra already.
+_VLM_ONLY = frozenset({"qwen4_exp", "deepseek_v4", "kimi_k3", "minimax_m3"})
+# Dense Qwen3.8 VLMs are qwen3_5 with a vision tower; mlx-lm can load text
+# but mlx-vlm owns the multimodal graph. Prefer vlm when vision_config is set.
+_VLM_LOAD_KEYS = ("lazy", "adapter_path", "revision", "strict")
+
+
+def _config_model_type(model_path: str) -> str:
+    from slotbank.admit import load_hf_config
+
+    cfg = load_hf_config(model_path)
+    raw = cfg.get("model_type") or (cfg.get("text_config") or {}).get("model_type") or ""
+    return str(raw).lower()
+
+
+def _model_sources(model_path: str | None = None):
     """Loaders to try, in order. SLOTBANK_LOADER pins one.
 
     Expert slotting attaches by class *name*, so it works against any package
@@ -35,14 +82,67 @@ def _model_sources():
     mlx-lm and mlx-vlm. Keeping the loader pluggable is what decouples model
     coverage from a single package's release cadence: as of mlx-lm 0.31.3,
     `deepseek_v4`, `kimi_k3` and `minimax_m3` exist only in mlx-vlm.
+    `qwen4_exp` (Qwen3.8-Flash-Next) is the same, and is experimental: it
+    needs mlx-vlm git main, not a released mlx-lm.
     """
     import os
 
     pinned = os.environ.get("SLOTBANK_LOADER", "").strip().lower()
     order = ["mlx_lm", "mlx_vlm"]
+    if model_path:
+        from slotbank.admit import load_hf_config
+
+        cfg = load_hf_config(model_path)
+        kind = str(
+            cfg.get("model_type")
+            or (cfg.get("text_config") or {}).get("model_type")
+            or ""
+        ).lower()
+        # Text-only is the 24 GB default: mlx-lm drops the vision tower
+        # (~0.4 GiB on Qwen3.8-27B) and the vlm wrapper graph. Opt in with
+        # SLOTBANK_VISION=1 or --vision. Architectures mlx-lm cannot load
+        # still go through vlm first.
+        if _draft_on():
+            # DFlash verify lives in mlx-vlm (rollback_speculative_cache).
+            order = ["mlx_vlm"]
+        elif kind in _VLM_ONLY or (_vision_on() and cfg.get("vision_config")):
+            order = ["mlx_vlm", "mlx_lm"]
     if pinned in order:
         order = [pinned]
     return order
+
+
+def _loader_kwargs(name: str, kwargs: dict) -> dict:
+    """mlx-lm takes tokenizer_config; mlx-vlm.load forwards extras into
+    load_model. A TypeError retry without kwargs would drop lazy=True and
+    eager-materialise a 100 GB Flash-Next. So vlm gets only its real keys."""
+    if name != "mlx_vlm":
+        return kwargs
+    return {k: kwargs[k] for k in _VLM_LOAD_KEYS if k in kwargs}
+
+
+def _as_tokenizer(obj):
+    """mlx-lm returns a tokenizer; mlx-vlm returns a ProcessorMixin.
+
+    encode/decode live on processor.tokenizer. Using the processor as a
+    tokenizer 500s the chat path the first time a VLM loads.
+    """
+    if callable(getattr(obj, "encode", None)):
+        return obj
+    inner = getattr(obj, "tokenizer", None)
+    if callable(getattr(inner, "encode", None)):
+        return inner
+    raise ValueError("loader returned no tokenizer.encode")
+
+
+def _vlm_hint(kind: str) -> str:
+    base = "install with: pip install 'slotbank[vlm]'"
+    if kind == "qwen4_exp":
+        return (
+            f"{base}; qwen4_exp is experimental and needs mlx-vlm git main "
+            "(2026-08-27+): pip install git+https://github.com/Blaizzy/mlx-vlm.git"
+        )
+    return base
 
 
 def _load_model(model_path: str, kwargs: dict):
@@ -53,23 +153,33 @@ def _load_model(model_path: str, kwargs: dict):
     a corrupt checkpoint -- is re-raised immediately so real errors are not
     masked by a fallback attempt.
     """
+    kind = _config_model_type(model_path)
     errors = []
-    for name in _model_sources():
+    for name in _model_sources(model_path):
         try:
             mod = __import__(name, fromlist=["load"])
         except ImportError:
             errors.append(f"{name}: not installed")
+            if name == "mlx_vlm":
+                errors.append(_vlm_hint(kind))
             continue
         try:
-            return mod.load(model_path, **kwargs)
+            model, tok = mod.load(model_path, **_loader_kwargs(name, kwargs))
+            return model, _as_tokenizer(tok)
         except (ValueError, KeyError, AttributeError) as exc:
             # unsupported architecture, or tensor names this package rejects
             errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            if name == "mlx_vlm" and kind == "qwen4_exp":
+                errors.append(_vlm_hint(kind))
             continue
         except TypeError as exc:
-            # signature drift between packages: retry without the extras
+            if name == "mlx_vlm":
+                # Do not retry without lazy=True: that eval's the whole bank.
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                continue
             try:
-                return mod.load(model_path)
+                model, tok = mod.load(model_path)
+                return model, _as_tokenizer(tok)
             except Exception:
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
                 continue
@@ -79,8 +189,41 @@ def _load_model(model_path: str, kwargs: dict):
     )
 
 
-def _kv_bits() -> int | None:
-    """SLOTBANK_KV_BITS: quantise the KV cache to 8 or 4 bits. Off by default.
+def _vision_on() -> bool:
+    import os
+
+    return os.environ.get("SLOTBANK_VISION", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _draft_on() -> bool:
+    import os
+
+    return bool(os.environ.get("SLOTBANK_DRAFT", "").strip())
+
+
+def _is_dense(um) -> bool:
+    card = getattr(um, "card", None) if um is not None else None
+    return getattr(card, "kind", None) == "dense"
+
+
+def _dense_tight(um) -> bool:
+    """Dense weights eating most of the working set — 27B on 24 GB."""
+    if um is None or not _is_dense(um):
+        return False
+    card, profile = um.card, getattr(um, "profile", None)
+    ws = getattr(profile, "max_working_set_bytes", 0) or 0
+    stored = int(getattr(card, "stored_bytes", 0) or 0)
+    return bool(ws and stored * 10 > ws * 7)
+
+
+def _kv_bits(um=None) -> int | None:
+    """SLOTBANK_KV_BITS: quantise the KV cache to 8 or 4 bits.
+
+    Off by default on MoE. Dense packs that already fill the working set get
+    8-bit automatically so 8k–16k context does not push peak into the Metal
+    buffer cap (13.3 GiB on this M4 Air). Set SLOTBANK_KV_BITS=0 to refuse.
 
     The cache is 96 KiB per token on Qwen3-30B-A3B (48 layers x 4 kv heads x
     128 head dim x 2 for K and V x 2 bytes), so it -- not the model -- sets the
@@ -101,23 +244,29 @@ def _kv_bits() -> int | None:
     """
     import os
 
+    # DFlash verify indexes keys.shape; QuantizedKVCache stores (w, scales).
+    if _draft_on():
+        return None
     raw = os.environ.get("SLOTBANK_KV_BITS", "").strip()
-    if not raw:
+    if raw.lower() in {"0", "off", "none", "fp16"}:
         return None
-    try:
-        bits = int(raw)
-    except ValueError:
-        return None
-    return bits if bits in (4, 8) else None
+    if raw:
+        try:
+            bits = int(raw)
+        except ValueError:
+            return None
+        return bits if bits in (4, 8) else None
+    return 8 if _dense_tight(um) else None
 
 
-def _kv_quant_start() -> int:
+def _kv_quant_start(um=None) -> int:
     """SLOTBANK_KV_START: context length past which the cache is quantised.
 
     Conversion is one-way and whole-cache, so short chats are left exact: the
     cache is only ~16% of the bytes read per token at 8k context, and all of the
     quality cost lands on long-context retrieval, which is where the memory is
-    needed anyway.
+    needed anyway. Dense-tight packs start at 0 so the first tokens already
+    use the smaller cache.
     """
     import os
 
@@ -127,7 +276,7 @@ def _kv_quant_start() -> int:
             return max(0, int(raw))
         except ValueError:
             pass
-    return 4096
+    return 0 if _dense_tight(um) else 4096
 
 
 def _prefill_step(default: int) -> int:
@@ -179,6 +328,83 @@ def _adaptive_step(step: int, prefix_n: int) -> int:
         return step
     allowed = max(64, _prefill_budget() // prefix_n)
     return max(1, min(step, allowed))
+
+
+def _tune_metal() -> None:
+    """Cap the allocator cache so freed activations do not sit at peak.
+
+    Peak on the 3.5bpw pack was 14.22 GiB against a 13.3 GiB max_buffer_length.
+    A large MLX cache is how a 12.5 GiB language model grows another 1+ GiB
+    after the first prefill. SLOTBANK_CACHE_LIMIT_MIB overrides (default 512).
+    """
+    import os
+
+    import mlx.core as mx
+
+    if not hasattr(mx, "metal") or not mx.metal.is_available():
+        return
+    raw = os.environ.get("SLOTBANK_CACHE_LIMIT_MIB", "512").strip()
+    try:
+        mib = int(raw)
+    except ValueError:
+        mib = 512
+    if mib <= 0:
+        return
+    setter = getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit
+    setter(mib << 20)
+
+
+def _generation_stream():
+    import mlx.core as mx
+
+    stream = getattr(_generation_stream, "_stream", None)
+    if stream is None:
+        stream = mx.new_thread_local_stream(mx.default_device())
+        _generation_stream._stream = stream
+    return stream
+
+
+def _strip_unused(model) -> list[str]:
+    """Drop vision / MTP modules when this process is text-only."""
+    if _vision_on() or model is None:
+        return []
+    dropped = []
+    for name in ("vision_tower", "visual", "vision_model", "mtp"):
+        if getattr(model, name, None) is not None:
+            setattr(model, name, None)
+            dropped.append(name)
+    if dropped:
+        import gc
+
+        import mlx.core as mx
+
+        gc.collect()
+        mx.clear_cache()
+    return dropped
+
+
+def _pin_dense(model) -> int:
+    """Materialise lazy weights so decode does not fault them from SSD."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    leaves = [v for _, v in tree_flatten(model.parameters()) if hasattr(v, "nbytes")]
+    for i in range(0, len(leaves), 64):
+        mx.eval(*leaves[i : i + 64])
+    mx.clear_cache()
+    return sum(int(v.nbytes) for v in leaves)
+
+
+def _model_bytes(model) -> int:
+    from mlx.utils import tree_reduce
+
+    return int(
+        tree_reduce(
+            lambda acc, x: acc + x.nbytes if hasattr(x, "nbytes") else acc,
+            model,
+            0,
+        )
+    )
 
 
 def _copy_state(st):
@@ -315,9 +541,10 @@ def _compile_logprobs():
 class Runtime:
     def __init__(self, args, *, eos_token_ids: set[int] | None = None, um=None):
         self._model_path = args.model_path
-        self._prefill_step_size = _prefill_step(
-            getattr(args, "prefill_step_size", 2048) or 2048
-        )
+        default_step = getattr(args, "prefill_step_size", 2048) or 2048
+        if _is_dense(um):
+            default_step = 512
+        self._prefill_step_size = _prefill_step(default_step)
         self._eos_token_ids: set[int] = set(eos_token_ids or ())
         self.um = um
         self._model = None
@@ -344,12 +571,17 @@ class Runtime:
         # unaffected: that path keeps self._cache and never round-trips state.
         # Upgrade path: teach _copy_state/_state_bytes to recurse and have
         # restore() rebuild the entry with the saved cache class.
-        self._kv_bits = _kv_bits()
+        self._kv_bits = _kv_bits(um)
+        self._kv_start = _kv_quant_start(um)
         self._prefix = (
             None if (_prefix_disabled() or self._kv_bits is not None)
             else PrefixCache()
         )
         self._wired = 0
+        self._draft = None
+        self._draft_kind = "dflash"
+        self._draft_block = None
+        self._dflash_cache = None
 
     @property
     def tokenizer(self):
@@ -362,6 +594,7 @@ class Runtime:
     def load(self, progress=None) -> None:
         if progress is not None:
             progress("load", 0, 1)
+        _tune_metal()
         kwargs = self.um.load_kwargs() if self.um is not None else {
             "lazy": True,
             "tokenizer_config": {"trust_remote_code": False},
@@ -370,7 +603,10 @@ class Runtime:
         from slotbank.expert_slots import install_expert_slots
 
         install_expert_slots(model, model_path=self._model_path, um=self.um)
-        self._wired = self._raise_wired_limit()
+        _strip_unused(model)
+        if _is_dense(self.um):
+            _pin_dense(model)
+        self._wired = self._raise_wired_limit(model)
         self._model = model
         # The warm pass is deferred to the first request that can pay for it.
         # See _maybe_warm: it costs ~6.5 s and returns ~49.5 ms/token, so it is
@@ -380,16 +616,49 @@ class Runtime:
         if eos is not None:
             self._eos_token_ids.add(int(eos))
         self._logprobs = _compile_logprobs()
+        self._load_draft()
         if progress is not None:
             progress("load", 1, 1)
 
-    def _raise_wired_limit(self) -> int:
-        """Let MLX wire the whole admitted working set, not just the expert pack.
+    def _load_draft(self) -> None:
+        import os
+        from pathlib import Path
 
-        HotResidency sizes the limit from pack bytes alone, which leaves the
-        dense weights and KV evictable -- and another app using memory will push
-        exactly those out. The limit is a cap, not a reservation, so raising it
-        costs nothing when the model is smaller than the cap.
+        path = os.environ.get("SLOTBANK_DRAFT", "").strip()
+        if not path:
+            return
+        path = str(Path(path).expanduser())
+        kind = os.environ.get("SLOTBANK_DRAFT_KIND", "").strip() or None
+        block = os.environ.get("SLOTBANK_DRAFT_BLOCK", "").strip()
+        if block:
+            self._draft_block = int(block)
+        else:
+            from slotbank.admit import draft_block_from_config
+
+            self._draft_block = draft_block_from_config(path)
+        from mlx_vlm.speculative.drafters import (
+            load_drafter,
+            validate_drafter_compatibility,
+        )
+
+        draft, resolved = load_drafter(path, kind=kind)
+        if not hasattr(self._model, "language_model"):
+            raise ValueError(
+                "DFlash verify needs an mlx-vlm model with language_model"
+            )
+        validate_drafter_compatibility(self._model, draft, resolved)
+        _pin_dense(draft)
+        self._draft = draft
+        self._draft_kind = resolved
+
+    def _raise_wired_limit(self, model=None) -> int:
+        """Wire model bytes plus slop, not the whole working set.
+
+        HotResidency sizes the limit from pack bytes alone, which leaves dense
+        weights evictable. Wiring the entire 16 GiB working set for a 13 GiB
+        model also leaves the Metal allocator no room under max_buffer_length
+        (13.3 GiB on this M4). Cap at model + 2 GiB, the recommended WS, and
+        the admitted working set.
         """
         import os
 
@@ -412,6 +681,11 @@ class Runtime:
         want = cap - (256 << 20) if cap else 0
         if self.um is not None and getattr(self.um, "profile", None) is not None:
             want = min(want or (1 << 62), int(self.um.profile.max_working_set_bytes))
+        if model is not None:
+            try:
+                want = min(want or (1 << 62), _model_bytes(model) + (2 << 30))
+            except (TypeError, ValueError):
+                pass
         if want <= 0:
             return 0
         try:
@@ -495,6 +769,13 @@ class Runtime:
     def shed_if_needed(self) -> bool:
         if self.um is None or not self.um.should_shed():
             return False
+        if self._draft is not None:
+            # The DFlash cache is the session. Dropping it on 24 GB pressure
+            # (the normal steady state) forces a full re-prefill every turn.
+            import mlx.core as mx
+
+            mx.clear_cache()
+            return True
         self._cache = None
         self._fed_ids = []
         import mlx.core as mx
@@ -548,6 +829,10 @@ class Runtime:
         self._generated = []
         self._pending = []
         self._spec_ok = None
+        if self._draft is not None:
+            # mlx-vlm generate_step owns prefill + GDN rollback.
+            # Append-only cache reuse is computed in _iter_draft.
+            return
         self._maybe_warm(getattr(sampling_params, "max_tokens", 0))
         reuse = reuse_prefill_start(self._fed_ids, ids) if self._cache is not None else 0
         if reuse == 0:
@@ -575,6 +860,7 @@ class Runtime:
         offset = reuse
         step = _adaptive_step(self._prefill_step_size, prefix_n)
         snaps = self._snap_points(offset, prefix_n)   # uses self._prompt_ids
+        stream = _generation_stream()
         while offset < prefix_n:
             if self._cancelled:
                 raise Cancelled()
@@ -583,11 +869,12 @@ class Runtime:
                 if offset < sp < end:
                     end = sp          # stop on the boundary so it can be cached
                     break
-            self._model(prompt[offset:end][None], cache=self._cache)
+            with mx.stream(stream):
+                self._model(prompt[offset:end][None], cache=self._cache)
+                states = _cache_states(self._cache)
+                if states is not None:
+                    mx.eval(states)
             self._fed_ids.extend(ids[offset:end])
-            states = _cache_states(self._cache)
-            if states is not None:
-                mx.eval(states)
             mx.clear_cache()
             offset = end
             if self._prefix is not None and offset in snaps:
@@ -616,7 +903,7 @@ class Runtime:
 
         maybe_quantize_kv_cache(
             self._cache,
-            quantized_kv_start=_kv_quant_start(),
+            quantized_kv_start=self._kv_start,
             kv_group_size=64,
             kv_bits=self._kv_bits,
         )
@@ -681,7 +968,10 @@ class Runtime:
         if not draft:
             return []
         toks = mx.array([[self._last_token] + draft], dtype=mx.int32)
-        logits = self._model(toks, cache=self._cache)
+        with mx.stream(_generation_stream()):
+            logits = self._model(toks, cache=self._cache)
+            states = _cache_states(self._cache)
+            mx.eval(logits, states) if states is not None else mx.eval(logits)
         picked = [int(v) for v in mx.argmax(logits[0], axis=-1).tolist()]
         self._spec_proposed += len(draft)
         out = [picked[0]]
@@ -699,6 +989,72 @@ class Runtime:
         self._fed_ids.extend(out[:accepted_draft])
         return out
 
+    def iter_steps(self):
+        """Yield GenerationStep until finished. DFlash uses mlx-vlm verify."""
+        if self._draft is not None:
+            yield from self._iter_draft()
+            return
+        while True:
+            step = self.step()
+            yield step
+            if step.finished:
+                return
+
+    def _iter_draft(self):
+        import mlx.core as mx
+        from mlx_vlm.generate.ar import generate_step
+        from mlx_vlm.generate.dispatch import _prime_cached_prefix_rope_state
+        from mlx_vlm.models import cache as vlm_cache
+
+        if self._cancelled:
+            raise Cancelled()
+        sp = self._sampling_params
+        if sp is None:
+            raise ValueError("start_request first")
+        reuse, feed = draft_feed(self._fed_ids, self._prompt_ids, self._dflash_cache is not None)
+        if reuse <= 0:
+            self._dflash_cache = vlm_cache.make_prompt_cache(self._model.language_model)
+        else:
+            full = mx.array([self._prompt_ids], dtype=mx.int32)
+            _prime_cached_prefix_rope_state(self._model, full, None, {})
+        ids = mx.array([feed], dtype=mx.int32)
+        top_k = sp.top_k if sp.top_k and sp.top_k > 0 else 0
+        kwargs: dict = {
+            "max_tokens": int(sp.max_tokens),
+            "temperature": float(sp.temperature),
+            "top_p": float(sp.top_p),
+            "top_k": int(top_k),
+            "draft_model": self._draft,
+            "draft_kind": self._draft_kind,
+            "draft_block_size": self._draft_block,
+            "prefill_step_size": self._prefill_step_size,
+            "prompt_cache": self._dflash_cache,
+        }
+        try:
+            for token, _lp in generate_step(ids, self._model, None, None, **kwargs):
+                if self._cancelled:
+                    raise Cancelled()
+                if isinstance(token, (list, tuple)):
+                    token = token[0]
+                step = self._finish_token(_as_host_token(token))
+                # Engine closes this generator on step.finished; commit
+                # before yield or the next turn cannot reuse the cache.
+                self._fed_ids = list(self._prompt_ids) + list(self._generated)
+                try:
+                    yield step
+                finally:
+                    if step.finished and not dflash_session_ok(
+                        self._dflash_cache, len(self._fed_ids)
+                    ):
+                        self._dflash_cache = None
+                        self._fed_ids = []
+                if step.finished:
+                    return
+        except Exception:
+            self._dflash_cache = None
+            self._fed_ids = []
+            raise
+
     def step(self) -> GenerationStep:
         import mlx.core as mx
 
@@ -715,11 +1071,17 @@ class Runtime:
         if self._logprobs is None:
             self._logprobs = _compile_logprobs()
         token = mx.array([self._last_token], dtype=mx.int32)
-        logits = self._model(token[None], cache=self._cache)
+        with mx.stream(_generation_stream()):
+            logits = self._model(token[None], cache=self._cache)
+            logits = logits[:, -1, :]
+            logprobs = self._logprobs(logits)
+            sampled = self._sampler(logprobs)
+            states = _cache_states(self._cache)
+            if states is not None:
+                mx.eval(sampled, states)
+            else:
+                mx.eval(sampled)
         self._fed_ids.append(int(self._last_token))
-        logits = logits[:, -1, :]
-        logprobs = self._logprobs(logits)
-        sampled = self._sampler(logprobs)
         token_id = _as_host_token(sampled)
         return self._finish_token(token_id)
 
@@ -770,6 +1132,8 @@ class Runtime:
         # retained per unloaded model, which is exactly what makes an idle
         # unload useless in a multi-model process.
         self._model = None
+        self._draft = None
+        self._dflash_cache = None
         self._tokenizer = None
         self._cache = None
         self._fed_ids = []

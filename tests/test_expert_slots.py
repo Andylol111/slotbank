@@ -26,6 +26,12 @@ def test_capacity_from_model_is_two_times_top_k():
     model = SimpleNamespace(args=SimpleNamespace(num_experts_per_tok=8, num_experts=64))
     assert _capacity_from_model(model, None) == 16
     assert _capacity_from_model(model, 32) == 32
+    vlm = SimpleNamespace(
+        language_model=SimpleNamespace(
+            args=SimpleNamespace(num_experts_per_tok=10, num_experts=512)
+        )
+    )
+    assert _capacity_from_model(vlm, None) == 20
 
 
 def test_capacity_from_um_keeps_olmoe_floor_and_grows_35b():

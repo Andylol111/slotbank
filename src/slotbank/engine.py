@@ -142,7 +142,9 @@ class Engine:
             try:
                 self._run_job(job)
             except Exception as exc:
-                job.out.put(("err", str(exc)))
+                import traceback
+
+                job.out.put(("err", f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"))
 
     def _run_job(self, job: Job) -> None:
         tok = self.runtime.tokenizer
@@ -151,8 +153,7 @@ class Engine:
         generated: list[int] = []
         finish = "stop"
         matched = None
-        while True:
-            step = self.runtime.step()
+        for step in self.runtime.iter_steps():
             generated.append(int(step.token_id))
             text = tok.decode(generated)
             piece = text[len(prev):]

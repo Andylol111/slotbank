@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -37,8 +38,70 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _thinking_on() -> bool:
+    return os.environ.get("SLOTBANK_THINKING", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _direct_on() -> bool:
+    return os.environ.get("SLOTBANK_DIRECT", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+# Short on purpose: it sits in every prefix, so it must stay byte-stable.
+_DIRECT_SYSTEM = (
+    "You are a local assistant on this machine. Be direct, specific, and useful. "
+    "Do not refuse ordinary adult, creative, or technical requests out of caution. "
+    "Do not add unsolicited lectures or disclaimers. Follow the user's instructions."
+)
+
+
+def direct_system_text() -> str:
+    raw = os.environ.get("SLOTBANK_DIRECT_PROMPT", "").strip()
+    if raw:
+        return raw
+    return _DIRECT_SYSTEM if _direct_on() else ""
+
+
+def with_direct(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prepend a stable persona. Does not replace a client system message."""
+    text = direct_system_text()
+    if not text:
+        return messages
+    if messages and messages[0].get("role") == "system":
+        head = dict(messages[0])
+        body = _text_of(head.get("content"))
+        if body.startswith(text):
+            return messages
+        head["content"] = text + ("\n\n" + body if body else "")
+        return [head, *messages[1:]]
+    return [{"role": "system", "content": text}, *messages]
+
+
+def with_context_os(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prefix = compiled_system_message()
+    if not prefix:
+        return messages
+    if messages and messages[0].get("role") == "system":
+        head = dict(messages[0])
+        head["content"] = prefix + "\n\n" + _text_of(head.get("content"))
+        return [head, *messages[1:]]
+    return [{"role": "system", "content": prefix}, *messages]
+
+
+def compiled_system_message() -> str:
+    if not os.environ.get("SLOTBANK_CONTEXT_DIR"):
+        return ""
+    from slotbank.context_os import compiled_system_message as compile_msg
+
+    repo = os.environ.get("SLOTBANK_CONTEXT_REPO")
+    return compile_msg(repo=repo)
+
+
 def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | None) -> list[int]:
-    msgs = normalize_messages(messages)
+    msgs = normalize_messages(with_context_os(with_direct(messages)))
     apply = getattr(tokenizer, "apply_chat_template", None)
 
     def plain() -> list[int]:
@@ -50,6 +113,7 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
+        "enable_thinking": _thinking_on(),
     }
     if tools:
         kwargs["tools"] = tools
@@ -57,14 +121,35 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
         ids = apply(msgs, **kwargs)
     except TypeError:
         kwargs.pop("tools", None)
-        ids = apply(msgs, **kwargs)
+        try:
+            ids = apply(msgs, **kwargs)
+        except TypeError:
+            kwargs.pop("enable_thinking", None)
+            ids = apply(msgs, **kwargs)
     except ValueError:
         # A base model ships the method but no template, and transformers
         # raises rather than returning None. Without this, every base
         # checkpoint 500s on /v1/chat/completions instead of falling back.
         return plain()
+    return _token_ids(ids)
+
+
+def _token_ids(ids) -> list[int]:
+    """mlx-lm returns a list; mlx-vlm processors return a BatchEncoding.
+
+    BatchEncoding is not a dict subclass; iterating it yields the keys.
+    """
+    getter = getattr(ids, "get", None)
+    if callable(getter):
+        got = getter("input_ids")
+        if got is not None:
+            ids = got
+    if hasattr(ids, "tolist") and not isinstance(ids, (list, tuple)):
+        ids = ids.tolist()
+    if ids and isinstance(ids[0], (list, tuple)):
+        ids = ids[0]
     return [int(x) for x in ids]
 
 
 def encode_text(tokenizer, text: str) -> list[int]:
-    return [int(x) for x in tokenizer.encode(text)]
+    return _token_ids(tokenizer.encode(text))

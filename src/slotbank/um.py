@@ -125,11 +125,12 @@ class UmManager:
 
     @classmethod
     def from_args(cls, args: Any) -> UmManager:
-        from slotbank.admit import admit_or_raise, estimate_card
+        from slotbank.admit import admit_or_raise, estimate_card, refuse_draft_if_needed
 
         profile = detect_device_profile(leave_free_bytes=getattr(args, "leave_free", None))
         card = estimate_card(args)
         admission = admit_or_raise(args, profile=profile, card=card)
+        refuse_draft_if_needed(str(getattr(args, "model_path", "") or ""), profile, card)
         return cls(profile, admission, card)
 
     def load_kwargs(self) -> dict[str, Any]:

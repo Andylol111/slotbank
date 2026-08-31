@@ -1,0 +1,13 @@
+# Optional: DFlash2 (trained K=8) instead of native MTP.
+# Cool A/B 2026-08-31: slower than MTP on this Air (11.76 vs 13.47 count).
+# Daily path is examples/omp-qwen38.yml (MTP-4bit).
+#
+#   PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
+#     --model ~/Models/Qwen3.8-27B-4bit \
+#     --draft ~/Models/Qwen3.8-27B-DFlash2-4bit \
+#     --leave-free 6g --thinking --vision --direct
+providers:
+  slotbank-qwen38-27b-dflash:
+    type: anthropic
+    base_url: http://127.0.0.1:8080
+    model: Qwen3.8-27B-4bit
