@@ -101,6 +101,13 @@ def _not_ready(exc: EngineNotReady) -> JSONResponse:
     )
 
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
+
 def models_payload(engine) -> dict[str, Any]:
     """OpenAI ``GET /v1/models`` plus llama.cpp native fields OMP 18 parses."""
     ctx = int(getattr(engine, "context_window", 16384) or 16384)
@@ -154,6 +161,7 @@ def register_chat(app: FastAPI, engine) -> None:
             return StreamingResponse(
                 _stream_chat(engine, ids, sampling, req.model),
                 media_type="text/event-stream",
+                headers=_SSE_HEADERS,
             )
         result = engine.generate(ids, sampling)
         message: dict[str, Any] = {"role": "assistant", "content": result.content or None}
@@ -195,6 +203,7 @@ def register_chat(app: FastAPI, engine) -> None:
             return StreamingResponse(
                 _stream_completion(engine, ids, sampling, req.model),
                 media_type="text/event-stream",
+                headers=_SSE_HEADERS,
             )
         result = engine.generate(ids, sampling)
         return {

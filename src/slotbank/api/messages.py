@@ -162,6 +162,11 @@ def register_messages(app: FastAPI, engine) -> None:
             return StreamingResponse(
                 _stream_when_ready(engine, req, sampling, mid),
                 media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
             )
         try:
             ids = _tokenize(engine, req)
@@ -218,8 +223,9 @@ def _event(name: str, data: dict) -> str:
 
 _DONE = object()
 # OMP aborts Anthropic streams that go silent during 27B prefill. A ping
-# every few seconds is cheaper than a stall after "hi".
-STREAM_PING_S = 5.0
+# every couple of seconds is cheaper than a stall after "hi". Stay under
+# uvicorn's keep-alive and OMP's ping-progress window.
+STREAM_PING_S = 2.0
 # 27B 4-bit load on the Air is tens of seconds; hold the SSE open with pings
 # so a first hi during boot is not a 400.
 LOAD_WAIT_S = 180.0

@@ -100,9 +100,10 @@ def compiled_system_message() -> str:
     return compile_msg(repo=repo)
 
 
-# 27B 4-bit on 24 GB cannot prefill a repo-sized OMP dump (~26k tokens from
-# cwd ~/Desktop/slotbank). Refuse before Metal alloc; 0 disables.
-DEFAULT_MAX_PROMPT_TOKENS = 16384
+# 27B 4-bit on 24 GB cannot prefill ~15k tokens (OMP footer 45%/33K).
+# 16k accepted the dump and jetsammed mid-prefill (~60s Connection error).
+# 0 disables.
+DEFAULT_MAX_PROMPT_TOKENS = 8192
 
 
 def max_prompt_tokens() -> int:
@@ -123,9 +124,8 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
     if cap and len(ids) > cap:
         raise ValueError(
             f"prompt is {len(ids)} tokens (cap {cap}). "
-            "27B on 24 GB cannot prefill that. "
-            "OMP over ~50% of 33K is tools, MCP, or a project (footer ↳ name), "
-            "not just cwd. New session: omp --tools read, no project, no MCP. "
+            "27B on 24 GB cannot prefill that (~15k is a 45%/33K OMP footer and jetsams). "
+            "Drop the project (footer ↳ name), MCP, and extra tools: omp --tools read. "
             "Override: SLOTBANK_MAX_PROMPT=0"
         )
     return ids
