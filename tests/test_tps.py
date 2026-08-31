@@ -6,6 +6,7 @@ import pytest
 
 from slotbank.tps import (
     ADOPTED,
+    IN_TREE,
     M4_AIR_24G,
     REJECTED,
     STRATEGIES,
@@ -31,6 +32,8 @@ def test_catalog_sound():
     assert get("sliding-window-kv").status == REJECTED
     assert get("hybrid-kv-dynamic-page").status == REJECTED
     assert get("named-kv-survey").status == REJECTED
+    assert get("igpu-pyramid-tiles").status == IN_TREE
+    assert get("igpu-pyramid-tiles").needs_trim_cache is False
     assert get("mtplx-engine").status != ADOPTED
     assert get("tree-medusa-eagle").status != ADOPTED
     assert get("harness-temp-1").status == ADOPTED

@@ -143,6 +143,29 @@ def test_prefill_budget_override(monkeypatch):
     assert _adaptive_step(2048, 8192) == 2048, "bad value falls back to the default"
 
 
+def test_pyramid_step_keeps_early_tiles_large(monkeypatch):
+    """Uniform budget//prefix_n throttles the first chunk of a 32k prefill.
+
+    Attention peak is chunk x (offset + chunk). Early tiles can stay at the
+    configured step; later tiles shrink. Same peak, fewer Metal launches.
+    """
+    monkeypatch.delenv("SLOTBANK_PREFILL_BUDGET", raising=False)
+    from slotbank.runtime import _adaptive_step, _prefill_budget, _pyramid_step
+
+    budget = _prefill_budget()
+    prefix = 32768
+    early = _pyramid_step(2048, 0, prefix)
+    late = _pyramid_step(2048, 24576, prefix)
+    conservative = _adaptive_step(2048, prefix)
+    assert early == 2048, "first tile must not inherit the final-length throttle"
+    assert early > conservative
+    assert late <= early
+    assert late * (24576 + late) <= budget or late == 1
+    # 8k cap path stays the measured 2048 chunk
+    assert _pyramid_step(2048, 0, 8192) == 2048
+    assert _pyramid_step(2048, 8192, 8192) == 1
+
+
 def _vm(free_mb, inactive_mb=6000, spec_mb=200, purge_mb=100, wired_mb=4000):
     p = 16384
     mb = lambda n: n * 1024 * 1024 // p

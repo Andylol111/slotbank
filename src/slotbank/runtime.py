@@ -330,6 +330,30 @@ def _adaptive_step(step: int, prefix_n: int) -> int:
     return max(1, min(step, allowed))
 
 
+def _pyramid_step(step: int, offset: int, prefix_n: int) -> int:
+    """Size this prefill tile from the *current* prefix, not the final length.
+
+    Attention peak is chunk × (offset + chunk). A uniform budget//prefix_n
+    throttles the first 8k of a 32k prompt to the last-chunk size. Early
+    tiles stay large; later tiles shrink. Same peak, fewer Metal launches.
+    mlx-vlm generate_step still gets _adaptive_step — it takes one size.
+    """
+    remain = prefix_n - offset
+    if remain <= 0:
+        return 1
+    budget = _prefill_budget()
+    hi = max(1, min(int(step), remain))
+    lo, best = 1, 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if mid * (offset + mid) <= budget:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def _tune_metal() -> None:
     """Cap the allocator cache so freed activations do not sit at peak.
 
@@ -874,12 +898,12 @@ class Runtime:
         )
         prefix_n = len(ids) - 1
         offset = reuse
-        step = _adaptive_step(self._prefill_step_size, prefix_n)
         snaps = self._snap_points(offset, prefix_n)   # uses self._prompt_ids
         stream = _generation_stream()
         while offset < prefix_n:
             if self._cancelled:
                 raise Cancelled()
+            step = _pyramid_step(self._prefill_step_size, offset, prefix_n)
             end = min(offset + step, prefix_n)
             for sp in snaps:
                 if offset < sp < end:
@@ -1035,6 +1059,8 @@ class Runtime:
             _prime_cached_prefix_rope_state(self._model, full, None, {})
         ids = mx.array([feed], dtype=mx.int32)
         top_k = sp.top_k if sp.top_k and sp.top_k > 0 else 0
+        # mlx-vlm uses one chunk size for the whole suffix. Size it for the
+        # final length so a long feed cannot blow the attention-score peak.
         kwargs: dict = {
             "max_tokens": int(sp.max_tokens),
             "temperature": float(sp.temperature),
@@ -1043,7 +1069,9 @@ class Runtime:
             "draft_model": self._draft,
             "draft_kind": self._draft_kind,
             "draft_block_size": self._draft_block,
-            "prefill_step_size": self._prefill_step_size,
+            "prefill_step_size": _adaptive_step(
+                self._prefill_step_size, max(1, len(feed))
+            ),
             "prompt_cache": self._dflash_cache,
         }
         try:

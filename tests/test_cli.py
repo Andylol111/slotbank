@@ -132,12 +132,56 @@ def test_encode_chat_unwraps_vlm_batch_encoding(monkeypatch):
     assert encode_chat(Tok(Map()), [{"role": "user", "content": "hi"}], None) == [7, 8, 9]
 
 
+def test_keep_token_ids_is_sink_pyramid_tail():
+    """Paper analogue on token ids, not hybrid KV: sink + dense-early middle + tail.
+
+    Order stays sequential (TriAttention consolidate). Tail is the current turn.
+    Middle is denser near the sink (PyramidKV). One cut when over cap (BUZZ).
+    """
+    from slotbank.prompt import keep_token_ids
+
+    ids = list(range(100))
+    got = keep_token_ids(ids, 20)
+    assert got == sorted(got)
+    assert len(got) == 20
+    assert got[0] == 0
+    assert got[-1] == 99
+    # tail is a contiguous suffix; head is a contiguous prefix
+    assert got[:2] == [0, 1]
+    assert 99 in got and 98 in got
+    assert keep_token_ids(ids, 100) == ids
+    assert keep_token_ids(ids, 0) == ids
+    assert keep_token_ids([], 8) == []
+
+
+def test_encode_chat_packs_overlong_when_asked(monkeypatch):
+    """Opt-in: pack to the cap instead of 400. Off by default so dumps still refuse."""
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
+    monkeypatch.setenv("SLOTBANK_PROMPT_PACK", "1")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            return list(range(32))
+
+        def encode(self, text):
+            return list(range(32))
+
+    got = encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    assert len(got) == 8
+    assert got[0] == 0 and got[-1] == 31
+
+
 def test_encode_chat_refuses_overlong_prompt(monkeypatch):
     """A 26k OMP cwd dump must 400 before 27B prefills (and jetsams) the Air."""
     from slotbank.prompt import encode_chat, encode_text
 
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
 
     class Tok:
@@ -158,6 +202,7 @@ def test_encode_chat_cap_zero_disables(monkeypatch):
 
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "0")
 
     class Tok:
@@ -176,6 +221,7 @@ def test_encode_chat_default_cap_is_8k(monkeypatch):
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_MAX_PROMPT", raising=False)
+    monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
 
     class Tok:
         def __init__(self, n):
@@ -203,6 +249,7 @@ def test_encode_chat_caps_plain_fallback(monkeypatch):
 
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "4")
 
     class Tok:
