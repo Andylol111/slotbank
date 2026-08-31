@@ -33,6 +33,8 @@ def test_catalog_sound():
     assert get("tree-medusa-eagle").status != ADOPTED
     assert get("harness-temp-1").status == ADOPTED
     assert get("qwen35-4b-as-27b-drafter").status == REJECTED
+    assert get("omp-models-yml").status == ADOPTED
+    assert get("auto-sidecar-mtp").status == ADOPTED
     assert len(STRATEGIES) >= 10
 
 

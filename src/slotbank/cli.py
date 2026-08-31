@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
             "  slotbank pull <model>             download it\n"
             "  slotbank run <model>              chat with it\n"
             "  slotbank serve --model <model>    serve it to Claude Code / Codex / OMP\n"
+            "  slotbank omp --model <model>      list that server in Oh My Pi\n"
             "  slotbank context                  session log + compiled working set\n"
             "  slotbank tps                      what was tried for 27B tok/s\n"
         ),
@@ -48,7 +49,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)
     s.add_argument("--api-key", default=None)
+    s.add_argument(
+        "--no-omp",
+        action="store_true",
+        help="do not write ~/.omp/agent/models.yml",
+    )
     _tuning_args(s)
+
+    om = sub.add_parser(
+        "omp",
+        help="write ~/.omp/agent/models.yml so Oh My Pi lists this server",
+    )
+    om.add_argument("--model", required=True, help="short name, repo id, or local folder")
+    om.add_argument("--host", default="127.0.0.1")
+    om.add_argument("--port", type=int, default=8080)
+    om.add_argument("--thinking", action="store_true")
+    om.add_argument("--vision", action="store_true")
 
     r = sub.add_parser("run", help="chat with a model, keeping it loaded")
     r.add_argument("model", help="short name, repo id, or local folder")
@@ -167,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
             return _context(args)
         if args.cmd == "tps":
             return _tps(args)
+        if args.cmd == "omp":
+            return _omp(args)
         if args.cmd == "generate":
             return _generate(args)
         return _serve(args)
@@ -258,6 +276,11 @@ def _draft_args(p: argparse.ArgumentParser) -> None:
         default=None,
         help="verify block size (default: the drafter's trained block_size)",
     )
+    p.add_argument(
+        "--no-draft",
+        action="store_true",
+        help="do not auto-attach a sibling MTP/DFlash folder",
+    )
 
 
 _ENV_FOR = {
@@ -296,14 +319,46 @@ def _apply_tuning(args) -> None:
         os.environ["SLOTBANK_THINKING"] = "1"
     if getattr(args, "direct", False):
         os.environ["SLOTBANK_DIRECT"] = "1"
-    if getattr(args, "draft", None):
-        os.environ["SLOTBANK_DRAFT"] = os.path.expanduser(args.draft)
+    draft = getattr(args, "draft", None)
+    no_draft = getattr(args, "no_draft", False) and not draft
+    if no_draft:
+        os.environ.pop("SLOTBANK_DRAFT", None)
+        os.environ.pop("SLOTBANK_DRAFT_KIND", None)
+        os.environ.pop("SLOTBANK_DRAFT_BLOCK", None)
+    elif draft:
+        os.environ["SLOTBANK_DRAFT"] = os.path.expanduser(draft)
         kind = getattr(args, "draft_kind", None)
         if kind:
             os.environ["SLOTBANK_DRAFT_KIND"] = kind
         block = getattr(args, "draft_block_size", None)
         if block is not None:
             os.environ["SLOTBANK_DRAFT_BLOCK"] = str(block)
+    elif not os.environ.get("SLOTBANK_DRAFT", "").strip():
+        found = _auto_draft_path(getattr(args, "model", None))
+        if found:
+            os.environ["SLOTBANK_DRAFT"] = found
+            args.draft = found
+
+
+def _auto_draft_path(model: str | None) -> str | None:
+    """Sibling MTP/DFlash next to a local checkpoint, or None."""
+    if not model:
+        return None
+    try:
+        from slotbank.admit import discover_sidecar_draft
+
+        expanded = os.path.expanduser(str(model))
+        if os.path.isdir(expanded):
+            return discover_sidecar_draft(expanded)
+        from slotbank.registry import local_path, resolve
+
+        target = resolve(str(model))
+        path = local_path(target)
+        if not path:
+            return None
+        return discover_sidecar_draft(path)
+    except (ValueError, OSError, ImportError):
+        return None
 
 
 def _model_args(p: argparse.ArgumentParser) -> None:
@@ -400,11 +455,37 @@ def _generate(args) -> int:
         engine.close()
 
 
+def _omp(args) -> int:
+    from slotbank.admit import public_model_id
+    from slotbank.omp import selector, upsert
+
+    path = None
+    try:
+        from slotbank.registry import local_path, resolve
+
+        path = local_path(resolve(args.model))
+    except (ValueError, ImportError, OSError):
+        path = None
+    mid = public_model_id(path or args.model)
+    written = upsert(
+        model_id=mid,
+        host=getattr(args, "host", "127.0.0.1"),
+        port=int(getattr(args, "port", 8080)),
+        thinking=bool(getattr(args, "thinking", False)),
+        vision=bool(getattr(args, "vision", False)),
+    )
+    print(f"wrote {written}")
+    print(f"picker: {selector(mid)}")
+    print("refresh: omp models slotbank")
+    return 0
+
+
 def _serve(args) -> int:
     import uvicorn
 
+    from slotbank.admit import public_model_id
     from slotbank.api.app import create_app
-
+    from slotbank.omp import selector, upsert
     from slotbank.registry import local_path, resolve
 
     repo = resolve(args.model)
@@ -414,17 +495,39 @@ def _serve(args) -> int:
             f"slotbank: {repo} is not downloaded. Run: slotbank pull {args.model}\n")
         return 2
     _apply_tuning(args)
-    engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=repo)
-    app = create_app(engine, api_key=args.api_key)
+    mid = public_model_id(path)
+    omp_path = None
+    if not getattr(args, "no_omp", False):
+        omp_path = upsert(
+            model_id=mid,
+            host=args.host,
+            port=args.port,
+            thinking=bool(getattr(args, "thinking", False)),
+            vision=bool(getattr(args, "vision", False)),
+        )
     draft = os.environ.get("SLOTBANK_DRAFT", "").strip()
-    extra = f"\n  draft {draft} (mlx-vlm DFlash verify)" if draft else ""
-    print(f"slotbank serving {repo} on http://{args.host}:{args.port}\n"
+    extra = f"\n  draft {draft} (mlx-vlm verify; 27B tokens unchanged)" if draft else ""
+    if not draft:
+        extra += (
+            "\n  warning: no MTP/DFlash sidecar; this is greedy ~5.7 tok/s on 27B. "
+            "Put Qwen3.8-27B-MTP-4bit next to the model, or pass --draft"
+        )
+    omp_lines = ""
+    if omp_path is not None:
+        omp_lines = (
+            f"\n  OMP picker                 {selector(mid)}\n"
+            f"  OMP models.yml             {omp_path}\n"
+            f"  refresh                    omp models slotbank"
+        )
+    print(f"slotbank serving {mid} on http://{args.host}:{args.port}\n"
           f"  OpenAI / Codex / OpenCode  "
           f"OPENAI_BASE_URL=http://{args.host}:{args.port}/v1\n"
           f"  Claude Code / OMP          "
-          f"ANTHROPIC_BASE_URL=http://{args.host}:{args.port}\n"
-          f"  OMP models.yml             examples/omp-qwen38.yml"
+          f"ANTHROPIC_BASE_URL=http://{args.host}:{args.port}"
+          f"{omp_lines}"
           f"{extra}", flush=True)
+    engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=mid)
+    app = create_app(engine, api_key=args.api_key)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     engine.close()
     return 0
@@ -452,7 +555,12 @@ def _run(args) -> int:
     say = _status(args.quiet)
     t0 = time.perf_counter()
     say("loading model...")
-    engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=repo)
+    from slotbank.admit import public_model_id
+
+    engine = Engine(
+        path, leave_free=leave_free_arg(args.leave_free),
+        model_id=public_model_id(path),
+    )
     sampling = SamplingParams(temperature=args.temp, top_p=args.top_p,
                               top_k=args.top_k, max_tokens=args.max_tokens)
     try:
@@ -1047,8 +1155,8 @@ def _admit(args) -> int:
         print(f"DFlash (mlx-vlm verify): ok -- {draft}")
     else:
         print(
-            "DFlash (mlx-vlm verify): headroom ok; pass --draft <DFlash2-4bit> "
-            "for the ~10 tok/s path (trim speculation stays off on hybrid)"
+            "MTP/DFlash (mlx-vlm verify): headroom ok; a sibling "
+            "Qwen3.8-27B-MTP-4bit is auto-attached on serve, or pass --draft"
         )
     if not result.ok and card.stored_bytes > (14 << 30):
         print("hint: 4-bit 27B on 24 GB needs --leave-free 6g (18 GiB working set)")

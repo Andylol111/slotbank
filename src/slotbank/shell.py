@@ -144,12 +144,15 @@ class Shell:
             return False
         if self.engine is not None:
             self.close()
+        from slotbank.admit import public_model_id
         from slotbank.engine import Engine
 
         self._quiet()
         t0 = time.perf_counter()
         with self.err.status(f"loading {repo.split('/')[-1]}...", spinner="dots"):
-            self.engine = Engine(path, leave_free=self.leave_free, model_id=repo)
+            self.engine = Engine(
+                path, leave_free=self.leave_free, model_id=public_model_id(path),
+            )
         self.repo = repo
         self.history = []
         self.status(f"loaded in {time.perf_counter() - t0:.1f}s", "sb.ok")

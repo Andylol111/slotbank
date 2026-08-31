@@ -35,6 +35,17 @@ def test_health_skips_auth():
     assert r.json()["model"] == "toy"
 
 
+def test_models_list_matches_omp_discovery():
+    r = _client().get("/v1/models")
+    assert r.status_code == 200
+    row = r.json()["data"][0]
+    assert row["id"] == "toy"
+    assert row["owned_by"] == "slotbank"
+    assert "anthropic" in row["supported_endpoint_types"]
+    assert "openai" in row["supported_endpoint_types"]
+    assert row["max_model_len"] == 16384
+
+
 def test_chat_requires_key():
     c = _client()
     assert c.post("/v1/chat/completions", json={"model": "toy", "messages": [{"role": "user", "content": "x"}]}).status_code == 401

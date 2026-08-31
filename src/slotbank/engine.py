@@ -34,7 +34,10 @@ class Engine:
         self.runtime = Runtime(args, um=self.um)
         # An HF snapshot directory is named after the commit hash, so without
         # an explicit name every client would list "23511b94..." as the model.
-        self.model_id = model_id or model_path.rstrip("/").rsplit("/", 1)[-1]
+        from slotbank.admit import public_model_id
+
+        self.model_id = model_id or public_model_id(model_path)
+        self.context_window = 16384
         self._jobs: queue.Queue[Job | None] = queue.Queue()
         # Load on the worker thread, not here. MLX arrays are bound to the
         # thread that created them, so loading on the main thread and
