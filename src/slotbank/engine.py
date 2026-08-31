@@ -53,9 +53,14 @@ class Engine:
             raise RuntimeError(self._load_error)
 
     def close(self) -> None:
-        self._jobs.put(None)
-        self._thread.join(timeout=5)
-        self.runtime.close()
+        # Never call runtime.close() here. MLX arrays and mx.clear_cache()
+        # belong to the worker (same thread as load). On Python 3.13 that
+        # path fatal-aborts: PyThreadState_Get / GIL released, then SIGTRAP.
+        try:
+            self._jobs.put(None)
+        except Exception:
+            return
+        self._thread.join(timeout=30)
 
     def tokenize_chat(self, messages: list[dict], tools: list[dict] | None) -> list[int]:
         return encode_chat(self.runtime.tokenizer, messages, tools)
@@ -137,12 +142,10 @@ class Engine:
         while True:
             job = self._jobs.get()
             if job is None:
-                # Save here, not in close(). The slot-id arrays belong to this
-                # thread, so mx.eval on the caller's thread raises "no
-                # Stream(gpu, 1)" -- and close() runs in a finally, so that
-                # error replaces whatever really went wrong.
+                # Teardown on this thread only. Caller-thread close() used to
+                # mx.clear_cache after join and GIL-abort on 3.13.
                 try:
-                    self.runtime.save_profile()
+                    self.runtime.close()
                 except Exception:
                     pass
                 return
