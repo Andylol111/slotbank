@@ -85,7 +85,11 @@ def test_render_provider_is_current_omp_schema():
     assert "api: anthropic-messages" in text
     assert "auth: none" in text
     assert "id: Qwen3.8-27B-4bit" in text
+    assert "id: Qwen3.8-27B-4bit-agent" in text
+    assert "supportsTools: false" in text
+    assert "supportsTools: true" in text
     assert "reasoning: true" in text
+    assert "reasoning: false" in text
     assert "input: [text, image]" in text
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
     llama = render_provider(
@@ -130,6 +134,7 @@ providers:
     assert "discovery:" not in _block(text, "lm-studio")
     assert "type: openai-models-list" in _block(text, "slotbank")
     assert "contextWindow: 32768" in text
+    assert "Qwen3.8-27B-4bit-agent" in text
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
 
 
@@ -180,8 +185,9 @@ def test_cli_omp_writes_yml(tmp_path, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "llama.cpp/Qwen3.8-27B-4bit" in out
-    assert "lm-studio/Qwen3.8-27B-4bit" in out
-    assert "omp models refresh" in out
+    assert "llama.cpp/Qwen3.8-27B-4bit-agent" in out
+    assert "no tools" in out
+    assert "not this repo" in out
     assert dest.is_file()
     text = dest.read_text()
     assert "  llama.cpp:" in text
