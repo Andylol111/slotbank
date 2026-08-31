@@ -6,10 +6,11 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from slotbank.prompt import enforce_prompt_cap
 from slotbank.types import SamplingParams
 
 
@@ -84,6 +85,13 @@ def _vision_on() -> bool:
     }
 
 
+def _prompt_too_long(exc: ValueError) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": str(exc), "type": "invalid_request_error"}},
+        400,
+    )
+
+
 def models_payload(engine) -> dict[str, Any]:
     """OpenAI ``GET /v1/models`` plus llama.cpp native fields OMP 18 parses."""
     ctx = int(getattr(engine, "context_window", 16384) or 16384)
@@ -129,7 +137,7 @@ def register_chat(app: FastAPI, engine) -> None:
             # /v1/messages and /v1/responses already guard this.
             ids = engine.tokenize_chat(req.messages, _tools(req))
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return _prompt_too_long(exc)
         sampling = _sampling(req)
         if req.stream:
             return StreamingResponse(
@@ -162,10 +170,13 @@ def register_chat(app: FastAPI, engine) -> None:
 
     @app.post("/v1/completions")
     def completions(req: CompletionRequest):
-        if isinstance(req.prompt, list):
-            ids = [int(x) for x in req.prompt]
-        else:
-            ids = engine.tokenize_text(req.prompt)
+        try:
+            if isinstance(req.prompt, list):
+                ids = enforce_prompt_cap([int(x) for x in req.prompt])
+            else:
+                ids = engine.tokenize_text(req.prompt)
+        except ValueError as exc:
+            return _prompt_too_long(exc)
         sampling = _sampling(req)
         if req.stream:
             return StreamingResponse(

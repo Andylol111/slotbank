@@ -492,6 +492,7 @@ def _serve(args) -> int:
     from slotbank.admit import public_model_id
     from slotbank.api.app import EngineProxy, LoadingEngine, create_app
     from slotbank.omp import agent_selector, lm_studio_selector, selector, upsert
+    from slotbank.prompt import max_prompt_tokens
     from slotbank.registry import local_path, resolve
 
     repo = resolve(args.model)
@@ -518,6 +519,12 @@ def _serve(args) -> int:
             "\n  warning: no MTP/DFlash sidecar; this is greedy ~5.7 tok/s on 27B. "
             "Put Qwen3.8-27B-MTP-4bit next to the model, or pass --draft"
         )
+    cap = max_prompt_tokens()
+    cap_note = "off" if cap == 0 else str(cap)
+    extra += (
+        f"\n  max prompt                 {cap_note} tokens "
+        f"(SLOTBANK_MAX_PROMPT; 0 disables)"
+    )
     omp_lines = ""
     if omp_path is not None:
         omp_lines = (

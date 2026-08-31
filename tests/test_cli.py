@@ -132,6 +132,89 @@ def test_encode_chat_unwraps_vlm_batch_encoding(monkeypatch):
     assert encode_chat(Tok(Map()), [{"role": "user", "content": "hi"}], None) == [7, 8, 9]
 
 
+def test_encode_chat_refuses_overlong_prompt(monkeypatch):
+    """A 26k OMP cwd dump must 400 before 27B prefills (and jetsams) the Air."""
+    from slotbank.prompt import encode_chat, encode_text
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            return list(range(32))
+
+        def encode(self, text):
+            return list(range(32))
+
+    with pytest.raises(ValueError, match="prompt is 32 tokens \\(cap 8\\)"):
+        encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    with pytest.raises(ValueError, match="slotbank checkout"):
+        encode_text(Tok(), "hi")
+
+
+def test_encode_chat_cap_zero_disables(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "0")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            return list(range(20000))
+
+        def encode(self, text):
+            return list(range(20000))
+
+    assert len(encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)) == 20000
+
+
+def test_encode_chat_default_cap_is_16k(monkeypatch):
+    from slotbank.prompt import DEFAULT_MAX_PROMPT_TOKENS, encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_MAX_PROMPT", raising=False)
+
+    class Tok:
+        def __init__(self, n):
+            self.n = n
+
+        def apply_chat_template(self, msgs, **k):
+            return list(range(self.n))
+
+        def encode(self, text):
+            return list(range(self.n))
+
+    assert len(encode_chat(
+        Tok(DEFAULT_MAX_PROMPT_TOKENS), [{"role": "user", "content": "hi"}], None,
+    )) == DEFAULT_MAX_PROMPT_TOKENS
+    with pytest.raises(ValueError, match="16385 tokens"):
+        encode_chat(
+            Tok(DEFAULT_MAX_PROMPT_TOKENS + 1),
+            [{"role": "user", "content": "hi"}], None,
+        )
+
+
+def test_encode_chat_caps_plain_fallback(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "4")
+
+    class Tok:
+        def apply_chat_template(self, *a, **k):
+            raise ValueError("chat_template is not set")
+
+        def encode(self, text):
+            return list(range(10))
+
+    with pytest.raises(ValueError, match="prompt is 10 tokens"):
+        encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+
+
 def test_resolve_passes_through_explicit_ids(tmp_path):
     from slotbank.registry import resolve
 
