@@ -124,8 +124,10 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
     if cap and len(ids) > cap:
         raise ValueError(
             f"prompt is {len(ids)} tokens (cap {cap}). "
-            "27B on 24 GB cannot prefill that (~15k is a 45%/33K OMP footer and jetsams). "
-            "Drop the project (footer ↳ name), MCP, and extra tools: omp --tools read. "
+            "27B on 24 GB cannot prefill that. "
+            "OMP footer `/tmp ↳ name` means a git repo that is a *child* of cwd "
+            "was injected (e.g. /tmp/llama.cpp-dflash2). "
+            "mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools. "
             "Override: SLOTBANK_MAX_PROMPT=0"
         )
     return ids

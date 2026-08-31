@@ -481,9 +481,10 @@ def _omp(args) -> int:
     print(f"agent:  {agent_selector(mid)}  (tools + thinking)")
     print(f"also:   {lm_studio_selector(mid)}")
     print("then:   omp models refresh")
-    print("        start omp from ~ or /tmp, not this repo")
-    print("        (cwd ~/Desktop/slotbank dumps README+src into the prompt)")
-    print("        wait for serve 'ready'; omp --tools read  (31 tools ≈ 33K)")
+    print("        mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools")
+    print("        (not ~/Desktop/slotbank; not /tmp if /tmp/<repo> exists)")
+    print("        footer `/tmp ↳ name` = OMP injected that child git repo")
+    print("        wait for serve 'ready' before sending")
     return 0
 
 
@@ -536,8 +537,9 @@ def _serve(args) -> int:
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
-            f"  cwd                        start omp from ~ or /tmp, not this repo\n"
-            f"  first hi                   wait for 'ready'; omp --tools read"
+            f"  cwd                        mkdir /tmp/sb-hi && cd there "
+            f"(not /tmp if a git child exists)\n"
+            f"  first hi                   wait for 'ready'; omp --no-tools"
         )
     proxy = EngineProxy(LoadingEngine(mid))
     app = create_app(proxy, api_key=args.api_key)

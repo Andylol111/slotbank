@@ -149,7 +149,7 @@ def test_encode_chat_refuses_overlong_prompt(monkeypatch):
 
     with pytest.raises(ValueError, match="prompt is 32 tokens \\(cap 8\\)"):
         encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
-    with pytest.raises(ValueError, match="omp --tools read"):
+    with pytest.raises(ValueError, match="omp --no-tools"):
         encode_text(Tok(), "hi")
 
 
