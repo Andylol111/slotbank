@@ -29,6 +29,7 @@ def test_catalog_sound():
     assert get("mtp-plus-dflash").status == REJECTED
     assert get("unquantized-bf16-27b").status == REJECTED
     assert get("sliding-window-kv").status == REJECTED
+    assert get("hybrid-kv-dynamic-page").status == REJECTED
     assert get("mtplx-engine").status != ADOPTED
     assert get("tree-medusa-eagle").status != ADOPTED
     assert get("harness-temp-1").status == ADOPTED

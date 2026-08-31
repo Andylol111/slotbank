@@ -176,6 +176,22 @@ STRATEGIES: tuple[Strategy, ...] = (
         needs_trim_cache=True,
     ),
     Strategy(
+        "hybrid-kv-dynamic-page",
+        REJECTED,
+        "Dynamically page/offload hybrid KV so OMP's harness fits in 24 GB.",
+        "Load + `run hi` MEMORY PRESSURE 2 is ~15 GiB 4-bit weights + page cache, "
+        "not KV: 50 tokens × 64 KiB ≈ 3 MiB. 48 GDN layers are already O(1) "
+        "(~150 MiB ArraysCache). Only 16 full-attn layers grow (64 KiB/token). "
+        "mlx-lm ArraysCache cannot trim (you cannot drop N tokens from a hidden "
+        "state; PR 1254 reset-to-empty was refused). Daily --draft forbids "
+        "SLOTBANK_KV_BITS (verifier keys.shape). Prefill activations, not KV, "
+        "are the spike that grows with context (3.61→5.06 GiB, 256→4096). "
+        "Levers that exist: shrink the prompt, SLOTBANK_PREFILL_STEP, "
+        "SLOTBANK_CACHE_LIMIT_MIB, append-only suffix reuse, context OS, "
+        "8-bit KV only when not drafting. A pager would change 27B text.",
+        needs_trim_cache=True,
+    ),
+    Strategy(
         "layer-stream-gdn",
         REJECTED,
         "Keep attention in RAM, stream GDN from SSD.",
@@ -351,6 +367,7 @@ def catalog_sound() -> None:
         "unquantized-bf16-27b",
         "mtp-plus-dflash",
         "sliding-window-kv",
+        "hybrid-kv-dynamic-page",
         "kv-quant-with-draft",
         "pflash-drop-prompt",
         "reverse-spec-small-writer",
