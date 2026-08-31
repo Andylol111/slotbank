@@ -450,7 +450,9 @@ def _generate(args) -> int:
             say(f"{seen['n']} tokens - {decode:.2f} tok/s decode - "
                 f"first token {seen['first'] - t0:.1f}s - "
                 f"{end - t0:.1f}s total{_memory_note(engine)}", end=True)
-        return 0
+        # Skip interpreter/MLX teardown. Python 3.13 fatal-aborts when the
+        # Metal worker thread exits (PyThreadState_Get / GIL released).
+        os._exit(0)
     finally:
         engine.close()
 
@@ -631,7 +633,10 @@ def _run(args) -> int:
 
         if args.prompt:
             answer([{"role": "user", "content": " ".join(args.prompt)}])
-            return 0
+            # One-shot: skip Engine.close() / interpreter teardown. MLX on
+            # Python 3.13 fatal-aborts (PyThreadState_Get / GIL released)
+            # when the Metal worker exits. The OS reclaims the process.
+            os._exit(0)
 
         history: list[dict] = []
         say("chat session - /bye to exit, /clear to reset the context", end=True)

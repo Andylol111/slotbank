@@ -235,17 +235,30 @@ def test_resolve_never_picks_gguf(monkeypatch):
     assert reg.resolve("Qwen3") == "mlx-community/Qwen3-4bit"
 
 
-def test_runtime_close_drops_refs_before_clearing_cache():
-    """Order matters: clearing MLX's cache while the model is still referenced
-    frees nothing, and the buffers land back in the cache as they release.
-    Measured at 1.09 GiB retained per unloaded model, which is what made an
-    idle unload useless in a multi-model process."""
+def test_runtime_close_drops_refs_and_skips_clear_cache():
+    """Drop refs first. mx.clear_cache after a Metal-thread generate GIL-aborts
+    on Python 3.13 (PyThreadState_Get), so close must not call it."""
     import inspect
 
     from slotbank.runtime import Runtime
 
     src = inspect.getsource(Runtime.close)
-    assert src.index("self._model = None") < src.index("mx.clear_cache()")
+    assert "self._model = None" in src
+    assert "gc.collect()" in src
+    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("clear_cache" in ln for ln in code)
+
+
+def test_engine_close_tears_down_on_the_worker_thread():
+    """Caller-thread runtime.close() after join was the SIGTRAP after `run hi`."""
+    import inspect
+
+    from slotbank.engine import Engine
+
+    close = inspect.getsource(Engine.close)
+    loop = inspect.getsource(Engine._loop)
+    assert "self.runtime.close()" not in close
+    assert "self.runtime.close()" in loop
 
 
 def test_serve_help_lists_draft(capsys):

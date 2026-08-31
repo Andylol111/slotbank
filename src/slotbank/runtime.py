@@ -1163,8 +1163,6 @@ class Runtime:
         self._cancelled = True
 
     def close(self) -> None:
-        import mlx.core as mx
-
         self.save_profile()
         # Drop every reference first. Clearing the cache while the model is
         # still referenced frees nothing, and the buffers then land back in
@@ -1180,7 +1178,9 @@ class Runtime:
         self._pending = []
         self._logprobs = None
         gc.collect()
-        mx.clear_cache()
+        # Do not mx.clear_cache() here. After a Metal-thread generate,
+        # clear_cache on Python 3.13 fatal-aborts (PyThreadState_Get /
+        # GIL released). Dropped refs + process exit reclaim the allocator.
 
     def _match_stop(self) -> str | None:
         stops = (self._sampling_params.stop_strs if self._sampling_params else None) or []
