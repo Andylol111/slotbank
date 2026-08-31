@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from slotbank.admit import discover_sidecar_draft, public_model_id
@@ -11,6 +12,14 @@ from slotbank.omp import (
     selector,
     upsert,
 )
+
+
+def _block(text: str, provider: str) -> str:
+    key = f"  {provider}:"
+    start = text.index(key)
+    rest = text[start + len(key):]
+    nxt = re.search(r"\n  [A-Za-z0-9_.-]+:", rest)
+    return text[start: start + len(key) + (nxt.start() if nxt else len(rest))]
 
 
 def _checkpoint(root: Path, name: str, cfg: dict) -> Path:
@@ -81,11 +90,12 @@ def test_render_provider_is_current_omp_schema():
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
     llama = render_provider(
         model_id="Qwen3.8-27B-4bit", thinking=True, vision=True,
-        provider_id="llama.cpp", api="openai-completions",
+        provider_id="llama.cpp", api="openai-completions", discovery=None,
     )
     assert "  llama.cpp:" in llama
     assert "api: openai-completions" in llama
     assert "thinkingFormat: qwen-chat-template" in llama
+    assert "discovery:" not in llama
 
 
 def test_compose_replaces_legacy_and_keeps_valid_sibling():
@@ -111,10 +121,14 @@ providers:
     assert BEGIN in text
     assert text.count("  slotbank:") == 1
     assert text.count("  llama.cpp:") == 1
+    assert text.count("  lm-studio:") == 1
     assert "api: anthropic-messages" in text
     assert "api: openai-completions" in text
     assert "timeoutMs: 30000" in text
     assert "thinkingFormat: qwen-chat-template" in text
+    assert "discovery:" not in _block(text, "llama.cpp")
+    assert "discovery:" not in _block(text, "lm-studio")
+    assert "type: openai-models-list" in _block(text, "slotbank")
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
 
 
@@ -132,6 +146,8 @@ def test_upsert_roundtrip(tmp_path, monkeypatch):
     body = dest.read_text()
     assert body.count("  slotbank:") == 1
     assert body.count("  llama.cpp:") == 1
+    assert body.count("  lm-studio:") == 1
+    assert "discovery:" not in _block(body, "llama.cpp")
 
 
 def test_example_yml_uses_current_omp_schema():
@@ -147,6 +163,8 @@ def test_example_yml_uses_current_omp_schema():
         assert "\n    base_url:" not in text and not text.startswith("base_url:"), name
         assert "baseUrl:" in text, name
         assert "auth: none" in text, name
+        if name != "omp-iq3-sidecar.yml":
+            assert "discovery:" not in _block(text, "llama.cpp"), name
 
 
 def test_cli_omp_writes_yml(tmp_path, monkeypatch, capsys):
@@ -161,12 +179,17 @@ def test_cli_omp_writes_yml(tmp_path, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "llama.cpp/Qwen3.8-27B-4bit" in out
+    assert "lm-studio/Qwen3.8-27B-4bit" in out
+    assert "omp models refresh" in out
     assert dest.is_file()
     text = dest.read_text()
     assert "  llama.cpp:" in text
+    assert "  lm-studio:" in text
     assert "api: openai-completions" in text
     assert "api: anthropic-messages" in text
     assert "baseUrl: http://127.0.0.1:8080/v1" in text
+    assert "discovery:" not in _block(text, "llama.cpp")
+    assert "discovery:" not in _block(text, "lm-studio")
 
 
 def test_apply_tuning_auto_attaches_sibling_mtp(tmp_path, monkeypatch):

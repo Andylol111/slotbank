@@ -95,7 +95,7 @@ PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
   --leave-free 6g --thinking --vision
 ```
 
-Point Oh My Pi at `http://127.0.0.1:8080`. `slotbank serve` writes `~/.omp/agent/models.yml` and answers llama.cpp's native `GET /models` on port 8080 so OMP 18's `/model` local pane (`llama.cpp`) is not empty. Picker `llama.cpp/Qwen3.8-27B-4bit`; F5 to refresh. Snippet: [`examples/omp-qwen38.yml`](examples/omp-qwen38.yml). A sibling `Qwen3.8-27B-MTP-4bit` is auto-attached if you omit `--draft`. For 30+ tok/s / less RAM, use the 4B snippet below.
+Point Oh My Pi at `http://127.0.0.1:8080`. Run `slotbank omp --model ~/Models/Qwen3.8-27B-4bit --thinking --vision` (no weight load) or `slotbank serve` — both write static `llama.cpp` / `lm-studio` rows into `~/.omp/agent/models.yml`. Then **`omp models refresh`** (F5 in `/model` keeps a cached empty list). Select `llama.cpp/Qwen3.8-27B-4bit` or `lm-studio/Qwen3.8-27B-4bit`, not the cloud catalog. Snippet: [`examples/omp-qwen38.yml`](examples/omp-qwen38.yml). A sibling `Qwen3.8-27B-MTP-4bit` is auto-attached if you omit `--draft`. For 30+ tok/s / less RAM, use the 4B snippet below.
 
 **Not built, on purpose.** No `layer_slots.py` (resident 4-bit is the speed path). No mlx-lm trim speculation on hybrid. No Apple Neural Engine: MLX 0.32.1 exposes only Metal GPU, and an ANE/Core ML copy of 27B is fp16 with a compile spike that does not fit beside 15 GiB of 4-bit weights on 24 GB. Drafters stay on GPU so verify stays bit-identical to the target. The `mtp/` folder in the 3.5bpw pack is unused; daily MTP is `~/Models/Qwen3.8-27B-MTP-4bit`.
 
