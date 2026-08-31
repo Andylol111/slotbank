@@ -24,7 +24,7 @@ providers:
           defaultLevel: high
         input: [text, image]
         tokenizer: qwen3
-        contextWindow: 16384
+        contextWindow: 32768
         maxTokens: 8192
         supportsTools: true
         compat:

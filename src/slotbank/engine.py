@@ -37,7 +37,7 @@ class Engine:
         from slotbank.admit import public_model_id
 
         self.model_id = model_id or public_model_id(model_path)
-        self.context_window = 16384
+        self.context_window = 32768
         self._jobs: queue.Queue[Job | None] = queue.Queue()
         # Load on the worker thread, not here. MLX arrays are bound to the
         # thread that created them, so loading on the main thread and
