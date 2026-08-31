@@ -327,6 +327,19 @@ def check_draft_compatible(model_path: str, draft_path: str) -> str | None:
         return "vocab_size missing from a config; refuse to guess"
     if int(tv) != int(dv):
         return f"vocab mismatch: target {tv} vs draft {dv}"
+    # Same vocab is not enough. A Qwen3.5-4B and Qwen3.8-27B both speak 248320
+    # tokens; the 4B is a full LM, not an MTP/DFlash student. mlx-lm trim-spec
+    # of an independent small model is silently wrong on Gated DeltaNet.
+    # Matching MTP/DFlash/EAGLE drafters are allowed even when they are shallower.
+    if not (dflash or "mtp" in dft_type or "eagle" in dft_type):
+        th = _first_int(t.get("hidden_size"))
+        dh = _first_int(d.get("hidden_size"))
+        if th and dh and th != dh:
+            return (
+                f"hidden_size mismatch: target {th} vs draft {dh}; "
+                "a smaller full model cannot draft this hybrid "
+                "(use the matching MTP sidecar)"
+            )
     return None
 
 

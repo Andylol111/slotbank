@@ -224,6 +224,28 @@ STRATEGIES: tuple[Strategy, ...] = (
         "Harness does not raise Metal tok/s. Count vs code was 13.47 vs 9.95, not 13 vs 27. "
         "Longer briefs spend more tokens. Thinking stays on; it uses tokens, it does not slow GEMM.",
     ),
+    Strategy(
+        "harness-temp-1",
+        ADOPTED,
+        "Anthropic/OMP temperature 1.0 with thinking. Rejection sampling keeps 27B.",
+        "messages.py already defaults temp to 1 when the client omits it. mlx-vlm "
+        "verify is Leviathan-Chen: output distribution is the 27B at that temperature. "
+        "Accept rate (hence tok/s) is lower than the greedy 13.47 bench. Do not force "
+        "temp 0 to chase the bench number — the harness uses 1 for thinking.",
+        extra_drafter=True,
+    ),
+    Strategy(
+        "qwen35-4b-as-27b-drafter",
+        REJECTED,
+        "Load Qwen3.5-4B (+ DFlash) as the 27B's speculative drafter.",
+        "Same vocab (248320) is a trap. The 4B is a different width (~2560 vs 5120) "
+        "and a full LM, not an MTP/DFlash student. Classic small-draft/large-verify "
+        "uses mlx-lm trim, which is silently wrong on Gated DeltaNet. 24 GB also "
+        "cannot hold 27B 4-bit (~15 GiB) and 4B+DFlash (~3 GiB) beside vision/KV. "
+        "4B+DFlash remains the separate ~46–54 tok/s door, not a 27B booster.",
+        extra_drafter=True,
+        changes_target_weights=True,
+    ),
 )
 
 
@@ -321,6 +343,7 @@ def catalog_sound() -> None:
         "skip-full-attn-on-draft",
         "extra-quant-3bit",
         "harness-structure-for-tps",
+        "qwen35-4b-as-27b-drafter",
     }
     for sid in banned_adopted:
         if get(sid).status == ADOPTED:

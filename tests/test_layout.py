@@ -148,6 +148,22 @@ def test_draft_compatibility_rejects_vocab_mismatch(tmp_path):
     # DFlash2 often omits vocab_size; it emits target token ids
     (b / "config.json").write_text(json.dumps({"model_type": "dflash2"}))
     assert check_draft_compatible(str(a), str(b)) is None
+    # Same vocab, different width: 4B is not a 27B drafter
+    (a / "config.json").write_text(json.dumps({
+        "vocab_size": 248320, "hidden_size": 5120,
+    }))
+    (b / "config.json").write_text(json.dumps({
+        "vocab_size": 248320, "hidden_size": 2560, "model_type": "qwen3_5",
+    }))
+    msg = check_draft_compatible(str(a), str(b))
+    assert msg and "hidden_size" in msg
+    # Matching MTP sidecar is the same width and an mtp model_type
+    (b / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_mtp",
+        "vocab_size": 248320,
+        "text_config": {"vocab_size": 248320, "hidden_size": 5120},
+    }))
+    assert check_draft_compatible(str(a), str(b)) is None
 
 
 def test_speculative_check_rejects_untrimmable_cache():

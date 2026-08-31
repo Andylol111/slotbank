@@ -89,6 +89,7 @@ class Engine:
         content, reasoning, calls = finish_text(raw)
         if calls:
             finish = "tool_calls"
+        kind, block, rate = self.runtime.draft_report()
         return GenResult(
             content=content,
             reasoning=reasoning,
@@ -97,6 +98,9 @@ class Engine:
             matched_stop=matched,
             prompt_tokens=len(input_ids),
             completion_tokens=len(ids),
+            draft_kind=kind,
+            draft_block=block,
+            draft_accept_rate=rate,
         )
 
     def stream(self, input_ids: list[int], sampling: SamplingParams) -> Iterator[tuple[str, object]]:
