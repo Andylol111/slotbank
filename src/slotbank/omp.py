@@ -1,13 +1,14 @@
 """Write Oh My Pi ``~/.omp/agent/models.yml`` without PyYAML.
 
-OMP 18's ``/model`` local pane is ``llama.cpp`` (probes ``:8080/models`` in
-250 ms) and ``lm-studio``, not a custom provider id. A ``slotbank:`` block
-alone lands in the long catalog list; ``llama.cpp: 0`` is what the picker
-shows when native discovery 404s. One invalid custom file also disables
-every custom provider for that run.
+OMP 18's ``/model`` local pane is ``llama.cpp`` and ``lm-studio``. Those
+rows are discovery-authoritative: an empty probe is cached (F5 keeps it —
+the footer says "cached model list") and ``All models`` stays at the bundled
+count. Putting ``discovery: openai-models-list`` on ``llama.cpp`` also
+*replaces* the implicit ``GET :8080/models`` probe, so a miss sticks.
 
-This writer replaces the ``llama.cpp`` override (static model + OpenAI list)
-and keeps a ``slotbank`` Anthropic alias. Filesystem only; no MLX.
+This writer lists the 27B as **static models** on both local engines (no
+``discovery:`` key) plus a ``slotbank`` Anthropic alias. Chat still needs
+``slotbank serve`` on :8080. Filesystem only; no MLX.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from typing import Iterable
 
 PROVIDER_ID = "slotbank"
 LLAMA_PROVIDER = "llama.cpp"
+LM_STUDIO_PROVIDER = "lm-studio"
 BEGIN = "# --- slotbank omp (managed) ---"
 END = "# --- end slotbank omp ---"
 LEGACY_IDS = frozenset({
@@ -27,6 +29,7 @@ LEGACY_IDS = frozenset({
     "slotbank-qwen35-4b",
     PROVIDER_ID,
     LLAMA_PROVIDER,
+    LM_STUDIO_PROVIDER,
 })
 
 _PROVIDER_KEY = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*(?:#.*)?$")
@@ -43,6 +46,10 @@ def models_yml_path() -> Path:
 def selector(model_id: str) -> str:
     """The /model row OMP 18 actually shows (local llama.cpp engine)."""
     return f"{LLAMA_PROVIDER}/{model_id}"
+
+
+def lm_studio_selector(model_id: str) -> str:
+    return f"{LM_STUDIO_PROVIDER}/{model_id}"
 
 
 def anthropic_selector(model_id: str) -> str:
@@ -66,25 +73,37 @@ def render_provider(
     max_tokens: int = 8192,
     provider_id: str = PROVIDER_ID,
     api: str = "anthropic-messages",
+    discovery: str | None = "openai-models-list",
 ) -> str:
-    """Indent-2 provider block, including the key line."""
+    """Indent-2 provider block, including the key line.
+
+    Pass ``discovery=None`` for OMP's built-in local engines. A discovery
+    key on ``llama.cpp`` / ``lm-studio`` replaces the implicit probe and
+    caches an empty list across F5.
+    """
     base = f"http://{host}:{int(port)}/v1"
     inputs = "[text, image]" if vision else "[text]"
     name = f"{model_id} (slotbank)"
+    reason = "true" if thinking else "false"
     lines = [
         f"  {provider_id}:",
         f"    baseUrl: {base}",
         f"    api: {api}",
         "    auth: none",
         "    disableStrictTools: true",
-        "    discovery:",
-        "      type: openai-models-list",
-        "      timeoutMs: 30000",
+    ]
+    if discovery:
+        lines.extend([
+            "    discovery:",
+            f"      type: {discovery}",
+            "      timeoutMs: 30000",
+        ])
+    lines.extend([
         "    models:",
         f"      - id: {_y(model_id)}",
         f"        name: {_y(name)}",
-        f"        reasoning: {'true' if thinking else 'false'}",
-    ]
+        f"        reasoning: {reason}",
+    ])
     if thinking:
         lines.extend([
             "        thinking:",
@@ -109,14 +128,20 @@ def render_provider(
 
 
 def render_managed_providers(**kwargs) -> str:
-    """llama.cpp (OMP /model local pane) + slotbank (Anthropic alias)."""
+    """Static llama.cpp + lm-studio (local /model pane) + slotbank alias."""
     llama = render_provider(
         **kwargs, provider_id=LLAMA_PROVIDER, api="openai-completions",
+        discovery=None,
+    )
+    studio = render_provider(
+        **kwargs, provider_id=LM_STUDIO_PROVIDER, api="openai-completions",
+        discovery=None,
     )
     slot = render_provider(
         **kwargs, provider_id=PROVIDER_ID, api="anthropic-messages",
+        discovery="openai-models-list",
     )
-    return llama + slot
+    return llama + studio + slot
 
 
 def _legacy_block(block: str) -> bool:
@@ -200,8 +225,9 @@ def compose_models_yml(
     )
     parts = [
         f"# Written by slotbank serve. /model picker: {selector(model_id)}",
+        f"# Same server as lm-studio: {lm_studio_selector(model_id)}",
         f"# Anthropic alias: {anthropic_selector(model_id)}",
-        "# F5 in /model, or: omp models llama.cpp",
+        "# Then: omp models refresh    (F5 in /model keeps a cached empty list)",
         "providers:",
     ]
     for _, block in others:

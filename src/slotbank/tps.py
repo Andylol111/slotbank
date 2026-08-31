@@ -251,10 +251,10 @@ STRATEGIES: tuple[Strategy, ...] = (
         ADOPTED,
         "Write current-schema ~/.omp/agent/models.yml on serve so OMP lists the 27B.",
         "Old examples used type: anthropic / base_url; one invalid custom file disables "
-        "all custom providers. OMP 18 /model local pane is llama.cpp (GET :8080/models "
-        "+ /props). Serve answers those plus /v1/models before weights finish loading. "
-        "YAML writes providers.llama.cpp (openai-completions + qwen thinking) and "
-        "providers.slotbank. Picker llama.cpp/<folder>. F5 if the list is cached.",
+        "all custom providers. OMP 18 /model local pane is llama.cpp + lm-studio. "
+        "discovery: openai-models-list on those ids replaces the implicit probe and "
+        "F5 keeps a cached empty list. YAML lists static models on both engines "
+        "(no discovery key) plus providers.slotbank. Then: omp models refresh.",
     ),
     Strategy(
         "auto-sidecar-mtp",
