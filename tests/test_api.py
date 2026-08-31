@@ -114,6 +114,65 @@ def test_claude_messages():
     assert body["stop_reason"] == "end_turn"
 
 
+def test_overlong_prompt_is_http_400(monkeypatch):
+    """OMP's first hi from ~/Desktop/slotbank is ~26k tokens. 400, not jetsam."""
+    from fastapi.testclient import TestClient
+
+    from slotbank.api.app import create_app
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
+
+    class FatEngine(FakeEngine):
+        def tokenize_chat(self, messages, tools):
+            class Tok:
+                def apply_chat_template(self, *a, **k):
+                    return list(range(32))
+
+                def encode(self, text):
+                    return list(range(32))
+
+            return encode_chat(Tok(), messages, tools)
+
+        def tokenize_text(self, text):
+            from slotbank.prompt import encode_text
+
+            class Tok:
+                def encode(self, t):
+                    return list(range(32))
+
+            return encode_text(Tok(), text)
+
+    c = TestClient(create_app(FatEngine(), api_key="k"))
+    headers = {"x-api-key": "k", "Authorization": "Bearer k"}
+    claude = c.post(
+        "/v1/messages",
+        headers=headers,
+        json={"model": "toy", "max_tokens": 16, "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert claude.status_code == 400
+    assert "32 tokens" in claude.json()["error"]["message"]
+    assert "slotbank checkout" in claude.json()["error"]["message"]
+
+    openai = c.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "toy", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert openai.status_code == 400
+    assert "32 tokens" in openai.json()["error"]["message"]
+
+    raw = c.post(
+        "/v1/completions",
+        headers=headers,
+        json={"model": "toy", "prompt": list(range(32))},
+    )
+    assert raw.status_code == 400
+    assert "32 tokens" in raw.json()["error"]["message"]
+
+
 def test_claude_count_tokens():
     r = _client().post(
         "/v1/messages/count_tokens",

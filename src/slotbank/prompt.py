@@ -100,6 +100,36 @@ def compiled_system_message() -> str:
     return compile_msg(repo=repo)
 
 
+# 27B 4-bit on 24 GB cannot prefill a repo-sized OMP dump (~26k tokens from
+# cwd ~/Desktop/slotbank). Refuse before Metal alloc; 0 disables.
+DEFAULT_MAX_PROMPT_TOKENS = 16384
+
+
+def max_prompt_tokens() -> int:
+    raw = os.environ.get("SLOTBANK_MAX_PROMPT", "").strip()
+    if not raw:
+        return DEFAULT_MAX_PROMPT_TOKENS
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_PROMPT_TOKENS
+    if n < 0:
+        return DEFAULT_MAX_PROMPT_TOKENS
+    return n
+
+
+def enforce_prompt_cap(ids: list[int]) -> list[int]:
+    cap = max_prompt_tokens()
+    if cap and len(ids) > cap:
+        raise ValueError(
+            f"prompt is {len(ids)} tokens (cap {cap}). "
+            "27B on 24 GB cannot prefill a repo-sized OMP context. "
+            "Start omp from ~ or /tmp, not the slotbank checkout. "
+            "Override: SLOTBANK_MAX_PROMPT=0"
+        )
+    return ids
+
+
 def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | None) -> list[int]:
     msgs = normalize_messages(with_context_os(with_direct(messages)))
     apply = getattr(tokenizer, "apply_chat_template", None)
@@ -109,7 +139,7 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
         return list(tokenizer.encode(text))
 
     if apply is None:
-        return plain()
+        return enforce_prompt_cap(plain())
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
@@ -130,8 +160,8 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
         # A base model ships the method but no template, and transformers
         # raises rather than returning None. Without this, every base
         # checkpoint 500s on /v1/chat/completions instead of falling back.
-        return plain()
-    return _token_ids(ids)
+        return enforce_prompt_cap(plain())
+    return enforce_prompt_cap(_token_ids(ids))
 
 
 def _token_ids(ids) -> list[int]:
@@ -152,4 +182,4 @@ def _token_ids(ids) -> list[int]:
 
 
 def encode_text(tokenizer, text: str) -> list[int]:
-    return _token_ids(tokenizer.encode(text))
+    return enforce_prompt_cap(_token_ids(tokenizer.encode(text)))

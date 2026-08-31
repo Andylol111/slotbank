@@ -266,6 +266,7 @@ def compose_models_yml(
         f"# Same server as lm-studio: {lm_studio_selector(model_id)}",
         f"# Anthropic alias: {anthropic_selector(model_id)}",
         "# Then: omp models refresh    (F5 in /model keeps a cached empty list)",
+        "# Start omp from ~ or /tmp — a slotbank cwd dump is ~26k tokens and 400s",
         "providers:",
     ]
     for _, block in others:
