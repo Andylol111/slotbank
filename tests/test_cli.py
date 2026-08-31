@@ -17,11 +17,14 @@ def test_check_capacity_matches_loader_policy():
     assert k <= c <= 64, f"C={c} is outside the measured-sane band"
 
 
-def test_encode_chat_falls_back_without_a_template():
+def test_encode_chat_falls_back_without_a_template(monkeypatch):
     """A base model has apply_chat_template but no template, and transformers
     raises ValueError rather than returning None. Every chat endpoint 500s
     without this fallback."""
     from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
 
     class Tok:
         def apply_chat_template(self, *a, **k):
@@ -31,6 +34,102 @@ def test_encode_chat_falls_back_without_a_template():
             return [len(text)]
 
     assert encode_chat(Tok(), [{"role": "user", "content": "hi"}], None) == [8]   # "user: hi"
+
+
+def test_encode_chat_thinking_defaults_off(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_THINKING", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    seen = {}
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            seen.update(k)
+            return [1]
+
+        def encode(self, text):
+            return [0]
+
+    encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    assert seen.get("enable_thinking") is False
+
+
+def test_encode_chat_direct_injects_system(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.setenv("SLOTBANK_DIRECT", "1")
+    got = {}
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            got["msgs"] = msgs
+            return [1]
+
+        def encode(self, text):
+            return [0]
+
+    encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    assert got["msgs"][0]["role"] == "system"
+    assert "Do not refuse ordinary" in got["msgs"][0]["content"]
+    assert got["msgs"][1]["content"] == "hi"
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+
+
+def test_encode_chat_direct_prepends_existing_system(monkeypatch):
+    from slotbank.prompt import encode_chat, direct_system_text
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.setenv("SLOTBANK_DIRECT", "1")
+    got = {}
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            got["msgs"] = msgs
+            return [1]
+
+        def encode(self, text):
+            return [0]
+
+    encode_chat(Tok(), [
+        {"role": "system", "content": "custom"},
+        {"role": "user", "content": "hi"},
+    ], None)
+    assert got["msgs"][0]["content"].startswith(direct_system_text())
+    assert "custom" in got["msgs"][0]["content"]
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+
+
+def test_encode_chat_unwraps_vlm_batch_encoding(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+
+    class Enc(dict):
+        pass
+
+    class Map:
+        def get(self, key, default=None):
+            return [7, 8, 9] if key == "input_ids" else default
+
+        def __iter__(self):
+            yield "input_ids"
+
+    class Tok:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def apply_chat_template(self, msgs, **k):
+            return self.payload
+
+        def encode(self, text):
+            return [0]
+
+    assert encode_chat(Tok(Enc(input_ids=[7, 8, 9])), [{"role": "user", "content": "hi"}], None) == [7, 8, 9]
+    assert encode_chat(Tok(Map()), [{"role": "user", "content": "hi"}], None) == [7, 8, 9]
 
 
 def test_resolve_passes_through_explicit_ids(tmp_path):
@@ -63,6 +162,62 @@ def test_runtime_close_drops_refs_before_clearing_cache():
 
     src = inspect.getsource(Runtime.close)
     assert src.index("self._model = None") < src.index("mx.clear_cache()")
+
+
+def test_serve_help_lists_draft(capsys):
+    from slotbank.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["serve", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--draft" in out and "DFlash" in out
+    assert "--thinking" in out and "--vision" in out
+    assert "--direct" in out
+
+
+def test_apply_tuning_sets_draft_env(monkeypatch, tmp_path):
+    import argparse
+    import os
+
+    from slotbank.cli import _apply_tuning
+
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT_KIND", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT_BLOCK", raising=False)
+    _apply_tuning(argparse.Namespace(
+        draft=str(tmp_path), draft_kind="dflash", draft_block_size=None,
+    ))
+    assert os.environ["SLOTBANK_DRAFT"] == str(tmp_path)
+    assert os.environ["SLOTBANK_DRAFT_KIND"] == "dflash"
+    assert "SLOTBANK_DRAFT_BLOCK" not in os.environ
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT_KIND", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT_BLOCK", raising=False)
+    _apply_tuning(argparse.Namespace(
+        draft=str(tmp_path), draft_kind=None, draft_block_size=8,
+    ))
+    assert os.environ["SLOTBANK_DRAFT_BLOCK"] == "8"
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT_BLOCK", raising=False)
+
+
+def test_apply_tuning_sets_thinking_and_vision(monkeypatch):
+    import argparse
+    import os
+
+    from slotbank.cli import _apply_tuning
+
+    monkeypatch.delenv("SLOTBANK_THINKING", raising=False)
+    monkeypatch.delenv("SLOTBANK_VISION", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    _apply_tuning(argparse.Namespace(thinking=True, vision=True, direct=True, draft=None))
+    assert os.environ["SLOTBANK_THINKING"] == "1"
+    assert os.environ["SLOTBANK_VISION"] == "1"
+    assert os.environ["SLOTBANK_DIRECT"] == "1"
+    monkeypatch.delenv("SLOTBANK_THINKING", raising=False)
+    monkeypatch.delenv("SLOTBANK_VISION", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
 
 
 def test_check_accepts_short_names_like_every_other_command():

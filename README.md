@@ -4,7 +4,7 @@ Run Mixture-of-Experts models on Apple Silicon without wiring the whole expert b
 
 No PyTorch. Inference is MLX. One process owns the model.
 
-**What it is for:** models whose expert bank exceeds the Metal working set. On a 24 GB Mac that is roughly 18–40 GiB of weights. Below that line, stock mlx-lm is faster and you should use stock. Above it, stock and llama.cpp do not run at all. See [Benchmarks](#benchmarks).
+**What it is for:** models whose expert bank exceeds the Metal working set. On a 24 GB Mac that is roughly 18–40 GiB of weights. Below that line, stock mlx-lm is faster and you should use stock. Above it, stock and llama.cpp do not run at all. A dense checkpoint that **fits** the working set (Qwen3.8-27B mixed 3.5bpw on this Air) is also served here: same HTTP door, stock mlx-vlm load, no expert slots. See [Benchmarks](#benchmarks) and [Qwen3.8-27B on 24 GB](#qwen38-27b-on-24-gb).
 
 ## About
 
@@ -49,9 +49,98 @@ That last row is why `SliceStore` issues `madvise(MADV_WILLNEED)` for the whole 
 - **Admit before load** — refuse a model whose active weights + KV do not fit
 - **Bit-identical** — default output matches stock mlx-lm exactly (maxabs 0.0)
 - **Agent APIs** — OpenAI Chat Completions (Cursor), Anthropic Messages (Claude Code), OpenAI Responses (Codex)
-- **CLI** — `generate`, `serve`, `admit`
+- **CLI** — `generate`, `serve`, `admit`, `context`
 
-Not included, on purpose: CUDA graphs, PCIe overlap, hybrid CPU experts, tensor parallelism, radix/semantic cache, a second draft model, a desktop GUI.
+Not included, on purpose: CUDA graphs, PCIe overlap, hybrid CPU experts, tensor parallelism, radix/semantic cache, a second draft model, a desktop GUI, a 1M SSD KV pager, layer-streaming dense weights.
+
+## Qwen3.8-27B on 24 GB
+
+Dense 27B has no expert subset. The slotbank move is the same one MoE already makes: **shrink the bytes that must stay hot until they fit in RAM**, then run stock mlx-vlm. Layer streaming from SSD is the fallback if even 3-bit OOMs; it was not needed here.
+
+**~1 tok/s vs ~10 tok/s.** Mixed 3.5bpw on this Air is **~1 tok/s** — stock mlx-lm, not a slotbank wrapper tax. The 7–10 tok/s RAM-bandwidth estimate assumes a uniform 4-bit GEMM; this pack is mostly 3-bit overrides and lands at the kernel ceiling. **Daily 27B is 4-bit + native MTP** (mlx-vlm exact verify, not mlx-lm trim). DFlash2 is still valid; on this Air MTP is faster and lighter.
+
+| Pack | Path | This Air (measured 2026-08-31) | Published same-class |
+|---|---|---|---|
+| `~/Models/Qwen3.8-27B-3.5bpw` | stock mlx-lm / slotbank text-only | **0.94–1.11 tok/s**, peak 12.8–14.2 GiB | ~11 tok/s on M2 Pro 32 GB (rapid-mlx card) |
+| `~/Models/Qwen3.8-27B-4bit` | greedy | **5.71 tok/s**, peak 14.4 GiB | 5–6.5 tok/s on M4 mini 24 GB |
+| 4-bit + `Qwen3.8-27B-DFlash2-4bit` | `--draft` trained K=8 | **11.76** count / **9.10** code, peak 16.5–17.0 GiB | **11.7–12.2 tok/s** on M4 mini 24 GB |
+| 4-bit + `Qwen3.8-27B-MTP-4bit` | `--draft` trained K=3 | **13.47** count / **9.95** code, peak 14.9–15.1 GiB | native MTP sidecar ~228 MB |
+
+```
+hf download mlx-community/Qwen3.8-27B-4bit --local-dir ~/Models/Qwen3.8-27B-4bit
+hf download z-lab/Qwen3.8-27B-DFlash2 --local-dir ~/Models/Qwen3.8-27B-DFlash2
+python -m mlx_vlm.convert --hf-path ~/Models/Qwen3.8-27B-DFlash2 \
+  --mlx-path ~/Models/Qwen3.8-27B-DFlash2-4bit --quantize --q-bits 4 --q-group-size 64
+
+PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
+  --model ~/Models/Qwen3.8-27B-4bit \
+  --draft ~/Models/Qwen3.8-27B-MTP-4bit \
+  --leave-free 6g --thinking --vision
+```
+
+`--leave-free 6g` (18 GiB working set) is required: ~15 GiB 4-bit + a drafter does not fit the default 16 GiB (leave-free 8). Native MTP is the measured daily drafter (~228 MB, trained K=3). DFlash2 still works (trained K=8, ~1 GiB). mlx-lm trim speculation stays **off** on this hybrid (48 Gated DeltaNet layers). `--draft` uses mlx-vlm's `rollback_speculative_cache`, which can rewind GDN state. KV quant is off on the draft path (the verifier reads `keys.shape`).
+
+**3.5bpw** (`rapid-mlx/Qwen3.8-27B-mixed-3.5bpw-MLX`) still fits at leave-free 8 and is the quality pack (MMLU-Pro 61.0 vs 54.2 for uniform 3-bit). It is not the local-use speed pack.
+
+**Context.** 16 full-attention layers × 4 KV heads × 256 × 2 × 2 bytes ≈ **64 KiB/token**, plus ~150 MiB fixed Gated DeltaNet state. Practical window **8k–16k**. 32k is a stretch. 128k+ does not fit. `can_trim_prompt_cache` is false — do not page or LRU the hybrid cache. The DFlash path keeps the live cache across turns and prefills only an **appended** suffix (new prompt starts with every token already cached). Measured on this Air: 819-token prefix reuse **0.88 s vs 17.0 s cold** (19×), greedy `bit_match=True`. Editing or reordering history is a full prefill, not a trim. Longer history than the window is the [context OS](#context-os): append-only disk log + verbatim excerpts, not a 1M KV tensor.
+
+**Thinking** is off unless `SLOTBANK_THINKING=1`. **Vision** is off unless `SLOTBANK_VISION=1` or `--vision`. Latency tests should keep both off.
+
+**Serve + OMP.** One process, existing Anthropic / OpenAI doors:
+
+```
+PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
+  --model ~/Models/Qwen3.8-27B-4bit \
+  --draft ~/Models/Qwen3.8-27B-MTP-4bit \
+  --leave-free 6g --thinking --vision
+```
+
+Point Oh My Pi at `http://127.0.0.1:8080` (Anthropic). Snippet: [`examples/omp-qwen38.yml`](examples/omp-qwen38.yml). For 30+ tok/s / less RAM, use the 4B snippet below.
+
+**Not built, on purpose.** No `layer_slots.py` (resident 4-bit is the speed path). No mlx-lm trim speculation on hybrid. No Apple Neural Engine: MLX 0.32.1 exposes only Metal GPU, and an ANE/Core ML copy of 27B is fp16 with a compile spike that does not fit beside 15 GiB of 4-bit weights on 24 GB. Drafters stay on GPU so verify stays bit-identical to the target. The `mtp/` folder in the 3.5bpw pack is unused; daily MTP is `~/Models/Qwen3.8-27B-MTP-4bit`.
+
+### 30+ tok/s (less RAM)
+
+27B 4-bit cannot hit 30 on 120 GB/s: a full-pack read is ~10 tok/s, native MTP measured **13.47** count / **9.95** code. Qwen3.5-9B is still GDN-compute-bound here (**6.4** raw, **13.8** DFlash). **Qwen3.5-4B 4-bit** is the pack that clears 30 on this Air (greedy, thinking/vision off, 2026-08-29 afternoon):
+
+| Pack | Path | tok/s | peak | `parse_iso_dates` to EOS |
+|---|---|---|---|---|
+| `Qwen3.5-4B-4bit` | stock mlx-vlm | **32.68** | 2.69 GiB | — |
+| + `Qwen3.5-4B-DFlash-4bit` | `--draft` block 5 | **46.39** raw / **54.32** slotbank | 2.87 GiB | **102** tokens, `bit_match=True` |
+| `Qwen3.5-9B-4bit` + DFlash | same | 13.75 | 5.70 GiB | 162 tokens |
+| `Qwen3.8-27B-4bit` + MTP | trained K=3 | **13.47** count / **9.95** code | 14.9–15.1 GiB | same 64-token window |
+| `Qwen3.8-27B-4bit` + DFlash2 | trained K=8 | **11.76** count / **9.10** code | 16.5–17.0 GiB | 156 tokens (older to-EOS run) |
+
+4B finished the same closed task in **fewer** tokens than 27B. Output is bit-identical to 4B greedy, not to 27B — keep the 27B serve line when you want that model.
+
+```
+hf download mlx-community/Qwen3.5-4B-4bit --local-dir ~/Models/Qwen3.5-4B-4bit
+hf download z-lab/Qwen3.5-4B-DFlash --local-dir ~/Models/Qwen3.5-4B-DFlash
+python -m mlx_vlm.convert --hf-path ~/Models/Qwen3.5-4B-DFlash \
+  --mlx-path ~/Models/Qwen3.5-4B-DFlash-4bit --quantize --q-bits 4 --q-group-size 64
+
+PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
+  --model ~/Models/Qwen3.5-4B-4bit \
+  --draft ~/Models/Qwen3.5-4B-DFlash-4bit
+```
+
+Default leave-free 8g is enough (~3 GiB hot). Omit `--draft` if you only need ~33 tok/s and 2.7 GiB. OMP: [`examples/omp-qwen35-4b.yml`](examples/omp-qwen35-4b.yml).
+
+### Context OS
+
+`slotbank context` keeps an append-only `log.jsonl`. `compile` selects newest verbatim spans that fit a token budget (default **4096**) and expands `file:path:lo-hi` pointers only when the whole span fits `SLOTBANK_CONTEXT_EXPAND` (default **1024** tokens). Oversized files stay on disk as citations. It does not paraphrase. One directory per local issue so tasks do not share one KV. Optional `SLOTBANK_CONTEXT_COMPILER_URL` POSTs `{log, repo, budget}` and must return `{working_set}`; offline falls back to the local extract.
+
+Serve injects the compiled working set as a system prefix when `SLOTBANK_CONTEXT_DIR` is set. `--leave-free 6g` is the multitask reserve; a 4k working set is ~256 MiB of KV plus a bounded prefill, so that reserve stays for the rest of the machine. Prefix KV reuse (`SLOTBANK_PREFIX_CACHE=1`) only hits when that prefix is byte-identical — the existing hybrid snapshot path. Reordering excerpts is a new prefill, not a trim. `SLOTBANK_CONTEXT_EXPAND=0` is citations only (smallest context-stage RAM).
+
+```
+slotbank context init --dir ~/.slotbank/sessions/job
+slotbank context append --dir ~/.slotbank/sessions/job --role user --content "..." --pointer file:src/foo.py:10-40
+slotbank context compile --dir ~/.slotbank/sessions/job --repo . --budget 4096
+SLOTBANK_CONTEXT_DIR=~/.slotbank/sessions/job \
+SLOTBANK_CONTEXT_REPO=. \
+SLOTBANK_CONTEXT_BUDGET=4096 \
+  slotbank serve --model ~/Models/Qwen3.8-27B-4bit --draft ~/Models/Qwen3.8-27B-DFlash2-4bit --leave-free 6g
+```
 
 ## Benchmarks
 
@@ -637,9 +726,11 @@ uv tool install slotbank          # or: pipx install slotbank
 slotbank                          # shows what to do next
 ```
 
-Add `slotbank[vlm]` for `kimi_k3`, `deepseek_v4`, and `minimax_m3` — model
-classes `mlx-lm` does not carry. It pulls ~370 MB of extra dependencies, so it is
-not the default.
+Add `slotbank[vlm]` for `qwen4_exp` (Qwen3.8-Flash-Next), `kimi_k3`,
+`deepseek_v4`, and `minimax_m3` — model classes `mlx-lm` does not carry.
+`qwen4_exp` is experimental and needs mlx-vlm git main (2026-08-27+):
+`pip install git+https://github.com/Blaizzy/mlx-vlm.git`. The extra pulls
+~370 MB, so it is not the default.
 
 **From source**, for development:
 
@@ -914,8 +1005,10 @@ non-MoE layers all break independently of anything slotbank touches.
 | GLM4-MoE, GLM4-MoE-Lite, GLM-MoE-DSA | supported by class, untested |
 | Kimi Linear, Kimi K2.5 | supported by class, untested |
 | Mixtral, OLMoE, PhiMoE, GPT-OSS, Llama4, MiniMax, Jamba | supported by class; OLMoE **measured** |
-| **DeepSeek-V4-Flash** | **not loadable**: `mlx-lm` has no `deepseek_v4` (only `mlx-vlm` does) |
-| Dense models of any size | **no benefit** — there are no experts to slot |
+| **DeepSeek-V4-Flash** | **mlx-vlm**: `mlx-lm` has no `deepseek_v4` |
+| **Qwen3.8-Flash-Next (`qwen4_exp`)** | **mlx-vlm git main**: experimental class; SwitchLinear attaches; n-gram table is not slotted |
+| Dense models that **fit** the working set | **served resident** (stock mlx-vlm / mlx-lm); Qwen3.8-27B 3.5bpw **measured** on 24 GB |
+| Dense models that do not fit | **no benefit** from expert slots; do not layer-stream unless admit fails |
 
 "Supported by class" means the patching mechanism attaches and the arithmetic is
 unchanged. It is not a claim that the model has been run. Two things break

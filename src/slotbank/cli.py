@@ -20,7 +20,8 @@ def main(argv: list[str] | None = None) -> int:
             "  slotbank check <model>            will it run here (no download)\n"
             "  slotbank pull <model>             download it\n"
             "  slotbank run <model>              chat with it\n"
-            "  slotbank serve --model <model>    serve it to Claude Code / Codex\n"
+            "  slotbank serve --model <model>    serve it to Claude Code / Codex / OMP\n"
+            "  slotbank context                  session log + compiled working set\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -101,6 +102,22 @@ def main(argv: list[str] | None = None) -> int:
 
     a = sub.add_parser("admit", help="print the memory card and refuse if it does not fit")
     _model_args(a)
+    _draft_args(a)
+
+    cx = sub.add_parser("context", help="session log + compiled working set")
+    cx_sub = cx.add_subparsers(dest="context_cmd")
+    cxi = cx_sub.add_parser("init", help="create an append-only log directory")
+    cxi.add_argument("--dir", required=True)
+    cxa = cx_sub.add_parser("append", help="append one message; never rewrites history")
+    cxa.add_argument("--dir", required=True)
+    cxa.add_argument("--role", required=True)
+    cxa.add_argument("--content", required=True)
+    cxa.add_argument("--pointer", action="append", default=[],
+                     help="verbatim pointer, e.g. file:src/foo.py:10-40")
+    cxc = cx_sub.add_parser("compile", help="print a verbatim working set from the log")
+    cxc.add_argument("--dir", required=True)
+    cxc.add_argument("--repo", default=None, help="repo root for file: pointers")
+    cxc.add_argument("--budget", type=int, default=None, help="token budget (default 4096)")
 
     args = p.parse_args(argv)
     if not args.cmd:
@@ -135,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             return _check(args)
         if args.cmd == "admit":
             return _admit(args)
+        if args.cmd == "context":
+            return _context(args)
         if args.cmd == "generate":
             return _generate(args)
         return _serve(args)
@@ -199,6 +218,33 @@ def _tuning_args(p: argparse.ArgumentParser) -> None:
                    help="tokens the hot-expert warm pass must pay back (default 128)")
     p.add_argument("--no-warm", action="store_true",
                    help="skip the hot-expert warm pass entirely")
+    p.add_argument("--vision", action="store_true",
+                   help="load the vision tower (off by default; saves ~0.4 GiB)")
+    p.add_argument("--thinking", action="store_true",
+                   help="enable the chat template thinking block (off by default)")
+    p.add_argument("--direct", action="store_true",
+                   help="inject a short no-lecture system prefix (does not change weights)")
+    _draft_args(p)
+
+
+def _draft_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--draft",
+        default=None,
+        help="drafter path (DFlash or MTP; mlx-vlm verify; trained block_size)",
+    )
+    p.add_argument(
+        "--draft-kind",
+        default=None,
+        choices=("dflash", "mtp", "eagle3"),
+        help="drafter family (default: auto from the drafter config)",
+    )
+    p.add_argument(
+        "--draft-block-size",
+        type=int,
+        default=None,
+        help="verify block size (default: the drafter's trained block_size)",
+    )
 
 
 _ENV_FOR = {
@@ -231,6 +277,20 @@ def _apply_tuning(args) -> None:
         os.environ["SLOTBANK_WARM"] = "0"
     if getattr(args, "slots", None) is not None:
         os.environ["SLOTBANK_SLOTS_OVERRIDE"] = str(args.slots)
+    if getattr(args, "vision", False):
+        os.environ["SLOTBANK_VISION"] = "1"
+    if getattr(args, "thinking", False):
+        os.environ["SLOTBANK_THINKING"] = "1"
+    if getattr(args, "direct", False):
+        os.environ["SLOTBANK_DIRECT"] = "1"
+    if getattr(args, "draft", None):
+        os.environ["SLOTBANK_DRAFT"] = os.path.expanduser(args.draft)
+        kind = getattr(args, "draft_kind", None)
+        if kind:
+            os.environ["SLOTBANK_DRAFT_KIND"] = kind
+        block = getattr(args, "draft_block_size", None)
+        if block is not None:
+            os.environ["SLOTBANK_DRAFT_BLOCK"] = str(block)
 
 
 def _model_args(p: argparse.ArgumentParser) -> None:
@@ -343,11 +403,15 @@ def _serve(args) -> int:
     _apply_tuning(args)
     engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=repo)
     app = create_app(engine, api_key=args.api_key)
+    draft = os.environ.get("SLOTBANK_DRAFT", "").strip()
+    extra = f"\n  draft {draft} (mlx-vlm DFlash verify)" if draft else ""
     print(f"slotbank serving {repo} on http://{args.host}:{args.port}\n"
           f"  OpenAI / Codex / OpenCode  "
           f"OPENAI_BASE_URL=http://{args.host}:{args.port}/v1\n"
-          f"  Claude Code                "
-          f"ANTHROPIC_BASE_URL=http://{args.host}:{args.port}", flush=True)
+          f"  Claude Code / OMP          "
+          f"ANTHROPIC_BASE_URL=http://{args.host}:{args.port}\n"
+          f"  OMP models.yml             examples/omp-qwen38.yml"
+          f"{extra}", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     engine.close()
     return 0
@@ -690,12 +754,12 @@ def _role_state(repo: str, budget: int) -> tuple[str, float]:
             b = stored_bytes_from_files(path)
         except (OSError, ValueError):
             return "unreadable", 0.0
-        return "dense, no benefit", b / float(1 << 30)
+        return "dense, resident", b / float(1 << 30)
     stored = int(getattr(card, "stored_bytes", 0) or 0)
     e = int(getattr(card, "n_routed_experts", 0) or 0)
     k = int(getattr(card, "top_k", 0) or 0)
     if not e or not k:
-        return "dense, no benefit", stored / float(1 << 30)
+        return "dense, resident", stored / float(1 << 30)
     frac = float(getattr(card, "expert_param_frac", 0) or 0.8)
     c = slot_capacity(e, k, stored_bytes=stored, working_set_bytes=budget,
                       kv_bytes=MIN_KV_BYTES, expert_param_frac=frac)
@@ -927,13 +991,83 @@ def _admit(args) -> int:
         if fits:
             print("note: bank fits the working set; stock mlx-lm will be faster "
                   "(slotbank is for models that do not fit)")
-    from slotbank.admit import hybrid_from_config, load_hf_config
+    from slotbank.admit import (
+        draft_viable,
+        hybrid_from_config,
+        kv_bytes_per_token,
+        load_hf_config,
+        max_context_tokens,
+    )
 
-    hybrid = hybrid_from_config(load_hf_config(args.model))
+    cfg = load_hf_config(args.model)
+    hybrid = hybrid_from_config(cfg)
+    if card.kind == "dense" and result.ok:
+        ctx = max_context_tokens(result, card, cfg)
+        per = kv_bytes_per_token(cfg)
+        print(
+            f"resident: weights fit; no layer stream. "
+            f"context ~{ctx} tokens at {per} B/tok after 1 GiB slop "
+            f"(8k-16k comfortable on 24 GB; longer history is the disk log)"
+        )
+        if cfg.get("vision_config") and os.environ.get("SLOTBANK_VISION", "0").strip() not in {
+            "1", "true", "yes", "on",
+        }:
+            print(
+                "text-only: vision tower not loaded (SLOTBANK_VISION=0 / no --vision); "
+                "mlx-lm language path, KV 8-bit if the pack is tight on the working set"
+            )
     if hybrid:
-        print(f"speculative decoding: UNSAFE -- {hybrid}; a rejected draft cannot "
+        print(f"speculative decoding (trim): UNSAFE -- {hybrid}; a rejected draft cannot "
               f"be rewound and output would be silently wrong")
+    draft = os.environ.get("SLOTBANK_DRAFT", "").strip()
+    draft_bytes = 1 << 30
+    if draft:
+        from slotbank.admit import stored_bytes_from_files
+
+        draft_bytes = stored_bytes_from_files(os.path.expanduser(draft)) or (1 << 30)
+    why = draft_viable(result, card, hybrid, draft_bytes=draft_bytes, verify="dflash")
+    if why:
+        print(f"DFlash (mlx-vlm verify): refuse -- {why}")
+        if "headroom" in why:
+            print("hint: 4-bit 27B + DFlash on 24 GB needs --leave-free 6g")
+    elif draft:
+        print(f"DFlash (mlx-vlm verify): ok -- {draft}")
+    else:
+        print(
+            "DFlash (mlx-vlm verify): headroom ok; pass --draft <DFlash2-4bit> "
+            "for the ~10 tok/s path (trim speculation stays off on hybrid)"
+        )
+    if not result.ok and card.stored_bytes > (14 << 30):
+        print("hint: 4-bit 27B on 24 GB needs --leave-free 6g (18 GiB working set)")
     return 0 if result.ok else 1
+
+
+def _context(args) -> int:
+    from pathlib import Path
+
+    from slotbank.context_os import append, compile_working_set, init_session
+
+    cmd = getattr(args, "context_cmd", None)
+    if cmd == "init":
+        root = init_session(args.dir)
+        print(root / "log.jsonl")
+        return 0
+    if cmd == "append":
+        rec = append(args.dir, args.role, args.content, pointers=args.pointer)
+        print(rec["seq"])
+        return 0
+    if cmd == "compile":
+        text = compile_working_set(
+            args.dir, budget=args.budget, repo=args.repo
+        )
+        out = Path(args.dir) / "working_set.txt"
+        out.write_text(text, encoding="utf-8")
+        sys.stdout.write(text)
+        if text and not text.endswith("\n"):
+            sys.stdout.write("\n")
+        return 0
+    sys.stderr.write("slotbank context: init | append | compile\n")
+    return 2
 
 
 if __name__ == "__main__":

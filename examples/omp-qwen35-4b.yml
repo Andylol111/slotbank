@@ -1,0 +1,11 @@
+# Oh My Pi (OMP) → slotbank Anthropic Messages door.
+# 30+ tok/s path (Qwen3.5-4B 4-bit). Draft is optional: raw already ~33 tok/s.
+#   PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
+#     --model ~/Models/Qwen3.5-4B-4bit \
+#     --draft ~/Models/Qwen3.5-4B-DFlash-4bit
+# Then copy this provider into ~/.omp/agent/models.yml.
+providers:
+  slotbank-qwen35-4b:
+    type: anthropic
+    base_url: http://127.0.0.1:8080
+    model: Qwen3.5-4B-4bit

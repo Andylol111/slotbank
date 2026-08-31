@@ -209,6 +209,7 @@ def test_loader_falls_through_unsupported_architecture(monkeypatch):
     from slotbank import runtime
 
     monkeypatch.delenv("SLOTBANK_LOADER", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
     calls = []
 
     def make(name, fail):
@@ -244,6 +245,7 @@ def test_loader_can_be_pinned_and_reports_every_failure(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlx_lm", boom("mlx_lm"))
     monkeypatch.setitem(sys.modules, "mlx_vlm", boom("mlx_vlm"))
 
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
     monkeypatch.setenv("SLOTBANK_LOADER", "mlx_vlm")
     assert runtime._model_sources() == ["mlx_vlm"], "pin must select one source"
 
@@ -253,5 +255,122 @@ def test_loader_can_be_pinned_and_reports_every_failure(monkeypatch):
     except ValueError as exc:
         msg = str(exc)
         assert "mlx_lm" in msg and "mlx_vlm" in msg, "must name every attempt"
+    else:
+        raise AssertionError("should have raised")
+
+
+def _qwen4_dir(tmp_path):
+    d = tmp_path / "qwen4"
+    d.mkdir()
+    (d / "config.json").write_text('{"model_type": "qwen4_exp"}')
+    return str(d)
+
+
+def test_vision_config_stays_on_mlx_lm_unless_asked(tmp_path, monkeypatch):
+    """Text-only is the 24 GB default: mlx-lm drops the vision tower."""
+    from slotbank import runtime
+
+    d = tmp_path / "qwen38"
+    d.mkdir()
+    (d / "config.json").write_text(
+        '{"model_type": "qwen3_5", "vision_config": {"depth": 24}}'
+    )
+    monkeypatch.delenv("SLOTBANK_LOADER", raising=False)
+    monkeypatch.delenv("SLOTBANK_VISION", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
+    assert runtime._model_sources(str(d)) == ["mlx_lm", "mlx_vlm"]
+    monkeypatch.setenv("SLOTBANK_VISION", "1")
+    assert runtime._model_sources(str(d)) == ["mlx_vlm", "mlx_lm"]
+    monkeypatch.delenv("SLOTBANK_VISION", raising=False)
+    monkeypatch.setenv("SLOTBANK_DRAFT", "/tmp/dflash")
+    assert runtime._model_sources(str(d)) == ["mlx_vlm"]
+
+
+def test_qwen4_exp_prefers_mlx_vlm(tmp_path, monkeypatch):
+    """qwen4_exp is experimental and only exists in mlx-vlm. Trying mlx-lm
+    first wastes a ValueError and a confusing 'not supported' on the path
+    that cannot work."""
+    import sys, types as pytypes
+
+    from slotbank import runtime
+
+    monkeypatch.delenv("SLOTBANK_LOADER", raising=False)
+    monkeypatch.delenv("SLOTBANK_DRAFT", raising=False)
+    path = _qwen4_dir(tmp_path)
+    assert runtime._model_sources(path) == ["mlx_vlm", "mlx_lm"]
+
+    calls = []
+
+    def make(name):
+        mod = pytypes.ModuleType(name)
+        def load(p, **kw):
+            calls.append((name, kw))
+            return (f"model-from-{name}", SimpleTokenizer())
+        mod.load = load
+        return mod
+
+    monkeypatch.setitem(sys.modules, "mlx_lm", make("mlx_lm"))
+    monkeypatch.setitem(sys.modules, "mlx_vlm", make("mlx_vlm"))
+    model, tok = runtime._load_model(path, {"lazy": True, "tokenizer_config": {"trust_remote_code": False}})
+    assert model == "model-from-mlx_vlm"
+    assert calls == [("mlx_vlm", {"lazy": True})]
+    assert tok.encode("x") == [1]
+
+
+class SimpleTokenizer:
+    def encode(self, text):
+        return [1]
+    def decode(self, ids):
+        return "x"
+
+
+class Processor:
+    tokenizer = SimpleTokenizer()
+
+
+def test_vlm_processor_unwraps_to_tokenizer():
+    from slotbank.runtime import _as_tokenizer
+
+    tok = SimpleTokenizer()
+    assert _as_tokenizer(tok) is tok
+    assert _as_tokenizer(Processor()).encode("hi") == [1]
+
+
+def test_vlm_kwargs_drop_tokenizer_config():
+    from slotbank.runtime import _loader_kwargs
+
+    kw = {"lazy": True, "tokenizer_config": {"trust_remote_code": False}}
+    assert _loader_kwargs("mlx_lm", kw) == kw
+    assert _loader_kwargs("mlx_vlm", kw) == {"lazy": True}
+
+
+def test_qwen4_exp_missing_vlm_names_the_git_install(tmp_path, monkeypatch):
+    import sys, types as pytypes
+
+    from slotbank import runtime
+
+    monkeypatch.delenv("SLOTBANK_LOADER", raising=False)
+    path = _qwen4_dir(tmp_path)
+    lm = pytypes.ModuleType("mlx_lm")
+    def boom(p, **kw):
+        raise ValueError("Model type qwen4_exp not supported.")
+    lm.load = boom
+    monkeypatch.setitem(sys.modules, "mlx_lm", lm)
+    monkeypatch.delitem(sys.modules, "mlx_vlm", raising=False)
+
+    orig = __import__
+
+    def fake_import(name, *a, **k):
+        if name == "mlx_vlm":
+            raise ImportError("No module named mlx_vlm")
+        return orig(name, *a, **k)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    try:
+        runtime._load_model(path, {"lazy": True})
+    except ValueError as exc:
+        msg = str(exc)
+        assert "mlx_vlm: not installed" in msg
+        assert "git+https://github.com/Blaizzy/mlx-vlm.git" in msg
     else:
         raise AssertionError("should have raised")

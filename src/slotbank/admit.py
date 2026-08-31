@@ -25,6 +25,20 @@ def load_hf_config(model_path: str) -> dict[str, Any]:
     return json.loads(cfg_path.read_text())
 
 
+def draft_block_from_config(model_path: str) -> int:
+    """Trained verify length. DFlash2 is 8, native MTP is 3; else 5.
+
+    Forcing one K for every drafter makes both routes the same wrong length.
+    """
+    cfg = load_hf_config(model_path)
+    inner = cfg.get("dflash_config")
+    n = _first_int(
+        inner.get("block_size") if isinstance(inner, dict) else None,
+        cfg.get("block_size"),
+    )
+    return n if n > 0 else 5
+
+
 def _first_int(*values: Any) -> int:
     for value in values:
         if value is None:
@@ -186,6 +200,89 @@ _RECURRENT_KEYS = (
 )
 
 
+def kv_bytes_per_token(cfg: dict[str, Any]) -> int:
+    """Full-attention KV bytes per token. Linear-attn state is O(1), not here."""
+    t = cfg.get("text_config") or cfg
+    types = t.get("layer_types")
+    if isinstance(types, list):
+        n_full = sum(1 for x in types if "full" in str(x) and "linear" not in str(x))
+    else:
+        n_layers = _first_int(t.get("num_hidden_layers"), t.get("num_layers"))
+        interval = _first_int(t.get("full_attention_interval")) or 4
+        n_full = max(1, n_layers // interval) if n_layers else 16
+    heads = _first_int(t.get("num_key_value_heads")) or 4
+    dim = _first_int(t.get("head_dim")) or 256
+    return max(1, n_full) * heads * dim * 2 * 2
+
+
+def max_context_tokens(profile, card, cfg: dict[str, Any], *, slop: int = 1 << 30) -> int:
+    """How many tokens fit after weights + slop. Dense hybrid advisor."""
+    per = kv_bytes_per_token(cfg)
+    room = profile.max_working_set_bytes - card.stored_bytes - slop
+    return max(0, room // per) if per else 0
+
+
+def draft_viable(
+    profile,
+    card,
+    hybrid: str | None,
+    *,
+    draft_bytes: int = 1 << 30,
+    verify: str = "trim",
+) -> str | None:
+    """Why a draft model should stay off, or None if it could fit.
+
+    ``verify="trim"`` is mlx-lm speculative_generate_step: a rejected draft
+    is rewound with trim_prompt_cache. Hybrid linear-attn caches cannot do
+    that, so this path is unsafe on Qwen3.8.
+
+    ``verify="dflash"`` is mlx-vlm's exact DFlash/MTP target verification,
+    which rolls Gated DeltaNet state back on reject. Hybrid is allowed;
+    the draft still has to fit beside the target. No extra 1 GiB slop:
+    4-bit 27B + a 1 GiB draft is already tight on 24 GB (leave-free 6).
+    """
+    if hybrid and verify != "dflash":
+        return f"UNSAFE -- {hybrid}; a rejected draft cannot be rewound"
+    room = profile.max_working_set_bytes - card.stored_bytes - MIN_KV_BYTES
+    need = draft_bytes if verify == "dflash" else draft_bytes + (1 << 30)
+    if room < need:
+        return f"no headroom: {room} bytes free, need {need} for a {draft_bytes} byte draft"
+    return None
+
+
+def refuse_draft_if_needed(model_path: str, profile, card) -> None:
+    """Admit a ``SLOTBANK_DRAFT`` pack using mlx-vlm verify, not trim."""
+    path = os.path.expanduser(os.environ.get("SLOTBANK_DRAFT", "").strip())
+    if not path:
+        return
+    if not os.path.isdir(path):
+        raise ValueError(f"draft not found: {path}")
+    stored = stored_bytes_from_files(path) or 0
+    cfg = load_hf_config(path)
+    quant = cfg.get("quantization") or cfg.get("quantization_config")
+    if stored > (2 << 30) and not quant:
+        raise ValueError(
+            f"draft is {stored / (1 << 30):.1f} GiB unquantized; convert to 4-bit:\n"
+            f"  python -m mlx_vlm.convert --hf-path {path} "
+            f"--mlx-path {path}-4bit --quantize --q-bits 4 --q-group-size 64"
+        )
+    why = check_draft_compatible(model_path, path)
+    if why:
+        raise ValueError(f"draft: {why}")
+    stored = stored or (1 << 30)
+    why = draft_viable(
+        profile,
+        card,
+        hybrid_from_config(load_hf_config(model_path)),
+        draft_bytes=stored,
+        verify="dflash",
+    )
+    if why:
+        raise ValueError(
+            f"draft: {why}; 4-bit 27B + DFlash on 24 GB needs --leave-free 6g"
+        )
+
+
 def hybrid_from_config(cfg: dict[str, Any]) -> str | None:
     """Detect recurrent/linear-attention layers from config alone.
 
@@ -221,7 +318,12 @@ def check_draft_compatible(model_path: str, draft_path: str) -> str | None:
     t = tgt.get("text_config") or tgt
     d = dft.get("text_config") or dft
     tv, dv = t.get("vocab_size"), d.get("vocab_size")
+    dft_type = str(dft.get("model_type") or "").lower()
+    dflash = "dflash" in dft_type or dft.get("dflash_config") is not None
     if tv is None or dv is None:
+        # DFlash2 checkpoints often omit vocab_size; they emit target token ids.
+        if dflash and tv is not None:
+            return None
         return "vocab_size missing from a config; refuse to guess"
     if int(tv) != int(dv):
         return f"vocab mismatch: target {tv} vs draft {dv}"

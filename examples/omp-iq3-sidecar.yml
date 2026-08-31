@@ -1,0 +1,22 @@
+# Parallel IQ3_XXS path. Does NOT replace 4-bit + DFlash on :8080.
+#
+# Daily 27B (keep this):
+#   PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
+#     --model ~/Models/Qwen3.8-27B-4bit \
+#     --draft ~/Models/Qwen3.8-27B-DFlash2-4bit \
+#     --leave-free 6g
+#
+# IQ3 sidecar (llama.cpp, OpenAI door, other port — 24 GB cannot hold both):
+#   llama-server \
+#     -m ~/Models/Qwen3.8-27B-GSQ-RCO-IQ3_XXS/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf \
+#     -ngl 99 -c 8192 --parallel 1 --fit off --flash-attn on \
+#     --reasoning off --no-mmproj --jinja --host 127.0.0.1 --port 8765
+#   SLOTBANK_CONTEXT_DIR=/path/to/session PYTHONPATH=src \
+#     .venv/bin/python scripts/check_iq3_sidecar.py
+#
+# OMP: type openai, not anthropic. Decode stays ~2 tok/s (IQ kernels).
+providers:
+  llama-iq3-xxs:
+    type: openai
+    base_url: http://127.0.0.1:8765/v1
+    model: Qwen3.8-27B-GSQ-RCO-IQ3_XXS
