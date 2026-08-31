@@ -1,12 +1,13 @@
 """Write Oh My Pi ``~/.omp/agent/models.yml`` without PyYAML.
 
-OMP's current schema is ``baseUrl`` + ``api: anthropic-messages`` + ``auth: none``.
-The examples that used ``type: anthropic`` / ``base_url`` fail validation, and
-**one invalid custom file disables every custom provider for that run**. OMP's
-implicit llama.cpp probe also hits ``http://127.0.0.1:8080/models`` (native), not
-``/v1/models``, so a slotbank server on 8080 is invisible until this file is valid.
+OMP 18's ``/model`` local pane is ``llama.cpp`` (probes ``:8080/models`` in
+250 ms) and ``lm-studio``, not a custom provider id. A ``slotbank:`` block
+alone lands in the long catalog list; ``llama.cpp: 0`` is what the picker
+shows when native discovery 404s. One invalid custom file also disables
+every custom provider for that run.
 
-Filesystem only. Nothing here imports MLX (tests/test_fence.py).
+This writer replaces the ``llama.cpp`` override (static model + OpenAI list)
+and keeps a ``slotbank`` Anthropic alias. Filesystem only; no MLX.
 """
 from __future__ import annotations
 
@@ -17,12 +18,15 @@ from pathlib import Path
 from typing import Iterable
 
 PROVIDER_ID = "slotbank"
+LLAMA_PROVIDER = "llama.cpp"
 BEGIN = "# --- slotbank omp (managed) ---"
 END = "# --- end slotbank omp ---"
 LEGACY_IDS = frozenset({
     "slotbank-qwen38-27b",
     "slotbank-qwen38-27b-dflash",
     "slotbank-qwen35-4b",
+    PROVIDER_ID,
+    LLAMA_PROVIDER,
 })
 
 _PROVIDER_KEY = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*(?:#.*)?$")
@@ -37,6 +41,11 @@ def models_yml_path() -> Path:
 
 
 def selector(model_id: str) -> str:
+    """The /model row OMP 18 actually shows (local llama.cpp engine)."""
+    return f"{LLAMA_PROVIDER}/{model_id}"
+
+
+def anthropic_selector(model_id: str) -> str:
     return f"{PROVIDER_ID}/{model_id}"
 
 
@@ -55,20 +64,22 @@ def render_provider(
     vision: bool = False,
     context_window: int = 16384,
     max_tokens: int = 8192,
+    provider_id: str = PROVIDER_ID,
+    api: str = "anthropic-messages",
 ) -> str:
-    """Indent-2 provider block, including the ``slotbank:`` key line."""
+    """Indent-2 provider block, including the key line."""
     base = f"http://{host}:{int(port)}/v1"
     inputs = "[text, image]" if vision else "[text]"
     name = f"{model_id} (slotbank)"
     lines = [
-        f"  {PROVIDER_ID}:",
+        f"  {provider_id}:",
         f"    baseUrl: {base}",
-        "    api: anthropic-messages",
+        f"    api: {api}",
         "    auth: none",
         "    disableStrictTools: true",
         "    discovery:",
         "      type: openai-models-list",
-        "      timeoutMs: 2000",
+        "      timeoutMs: 30000",
         "    models:",
         f"      - id: {_y(model_id)}",
         f"        name: {_y(name)}",
@@ -88,7 +99,24 @@ def render_provider(
         f"        maxTokens: {int(max_tokens)}",
         "        supportsTools: true",
     ])
+    if api == "openai-completions":
+        lines.extend([
+            "        compat:",
+            "          thinkingFormat: qwen-chat-template",
+            "          supportsReasoningParams: true",
+        ])
     return "\n".join(lines) + "\n"
+
+
+def render_managed_providers(**kwargs) -> str:
+    """llama.cpp (OMP /model local pane) + slotbank (Anthropic alias)."""
+    llama = render_provider(
+        **kwargs, provider_id=LLAMA_PROVIDER, api="openai-completions",
+    )
+    slot = render_provider(
+        **kwargs, provider_id=PROVIDER_ID, api="anthropic-messages",
+    )
+    return llama + slot
 
 
 def _legacy_block(block: str) -> bool:
@@ -138,7 +166,7 @@ def _provider_blocks(text: str) -> list[tuple[str, str]]:
 
 
 def kept_providers(text: str, *, drop: Iterable[str] = ()) -> list[tuple[str, str]]:
-    drop_ids = {PROVIDER_ID, *LEGACY_IDS, *drop}
+    drop_ids = {*LEGACY_IDS, *drop}
     kept = []
     for pid, block in _provider_blocks(text):
         if pid in drop_ids:
@@ -161,7 +189,7 @@ def compose_models_yml(
     max_tokens: int = 8192,
 ) -> str:
     others = kept_providers(existing)
-    body = render_provider(
+    body = render_managed_providers(
         model_id=model_id,
         host=host,
         port=port,
@@ -171,8 +199,9 @@ def compose_models_yml(
         max_tokens=max_tokens,
     )
     parts = [
-        f"# Written by slotbank serve. Selector: {selector(model_id)}",
-        "# Refresh the picker: omp models slotbank",
+        f"# Written by slotbank serve. /model picker: {selector(model_id)}",
+        f"# Anthropic alias: {anthropic_selector(model_id)}",
+        "# F5 in /model, or: omp models llama.cpp",
         "providers:",
     ]
     for _, block in others:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from typing import Any
@@ -77,22 +78,49 @@ def _openai_tools(calls) -> list[dict[str, Any]]:
     return out
 
 
+def _vision_on() -> bool:
+    return os.environ.get("SLOTBANK_VISION", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def models_payload(engine) -> dict[str, Any]:
+    """OpenAI ``GET /v1/models`` plus llama.cpp native fields OMP 18 parses."""
+    ctx = int(getattr(engine, "context_window", 16384) or 16384)
+    modalities = ["text", "image"] if _vision_on() else ["text"]
+    return {
+        "object": "list",
+        "data": [{
+            "id": engine.model_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "slotbank",
+            "supported_endpoint_types": ["anthropic", "openai"],
+            "max_model_len": ctx,
+            "context_length": ctx,
+            "meta": {"n_ctx": ctx, "n_ctx_train": ctx},
+            "architecture": {"input_modalities": modalities},
+        }],
+    }
+
+
+def llama_props_payload(engine) -> dict[str, Any]:
+    """llama.cpp ``GET /props`` so OMP's 150 ms probe is not a miss."""
+    ctx = int(getattr(engine, "context_window", 16384) or 16384)
+    return {
+        "n_ctx": ctx,
+        "modalities": {"vision": _vision_on()},
+        "default_generation_settings": {
+            "n_ctx": ctx,
+            "params": {"max_tokens": -1, "n_predict": -1},
+        },
+    }
+
+
 def register_chat(app: FastAPI, engine) -> None:
     @app.get("/v1/models")
     def models():
-        ctx = int(getattr(engine, "context_window", 16384) or 16384)
-        return {
-            "object": "list",
-            "data": [{
-                "id": engine.model_id,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "slotbank",
-                "supported_endpoint_types": ["anthropic", "openai"],
-                "max_model_len": ctx,
-                "context_length": ctx,
-            }],
-        }
+        return models_payload(engine)
 
     @app.post("/v1/chat/completions")
     def chat(req: ChatRequest):

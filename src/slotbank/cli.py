@@ -476,15 +476,17 @@ def _omp(args) -> int:
     )
     print(f"wrote {written}")
     print(f"picker: {selector(mid)}")
-    print("refresh: omp models slotbank")
+    print("refresh: omp models llama.cpp   (F5 in /model)")
     return 0
 
 
 def _serve(args) -> int:
+    import threading
+
     import uvicorn
 
     from slotbank.admit import public_model_id
-    from slotbank.api.app import create_app
+    from slotbank.api.app import EngineProxy, LoadingEngine, create_app
     from slotbank.omp import selector, upsert
     from slotbank.registry import local_path, resolve
 
@@ -517,19 +519,41 @@ def _serve(args) -> int:
         omp_lines = (
             f"\n  OMP picker                 {selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
-            f"  refresh                    omp models slotbank"
+            f"  refresh                    F5 in /model  (omp models llama.cpp)"
         )
+    proxy = EngineProxy(LoadingEngine(mid))
+    app = create_app(proxy, api_key=args.api_key)
+
+    def boot() -> None:
+        try:
+            loaded = Engine(
+                path, leave_free=leave_free_arg(args.leave_free), model_id=mid,
+            )
+            proxy.replace(loaded)
+            sys.stderr.write(f"slotbank: {mid} ready\n")
+            sys.stderr.flush()
+        except Exception as exc:
+            proxy.replace(LoadingEngine(
+                mid, error=f"{type(exc).__name__}: {exc}",
+            ))
+            sys.stderr.write(f"slotbank: load failed: {exc}\n")
+            sys.stderr.flush()
+
+    threading.Thread(target=boot, daemon=True, name="slotbank-load").start()
     print(f"slotbank serving {mid} on http://{args.host}:{args.port}\n"
+          f"  (weights still loading; /models is already up for OMP)\n"
           f"  OpenAI / Codex / OpenCode  "
           f"OPENAI_BASE_URL=http://{args.host}:{args.port}/v1\n"
           f"  Claude Code / OMP          "
           f"ANTHROPIC_BASE_URL=http://{args.host}:{args.port}"
           f"{omp_lines}"
           f"{extra}", flush=True)
-    engine = Engine(path, leave_free=leave_free_arg(args.leave_free), model_id=mid)
-    app = create_app(engine, api_key=args.api_key)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-    engine.close()
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        close = getattr(proxy.inner, "close", None)
+        if callable(close):
+            close()
     return 0
 
 
