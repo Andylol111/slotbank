@@ -269,7 +269,9 @@ def compose_models_yml(
         f"# Same server as lm-studio: {lm_studio_selector(model_id)}",
         f"# Anthropic alias: {anthropic_selector(model_id)}",
         "# Then: omp models refresh    (F5 in /model keeps a cached empty list)",
-        "# Start omp from ~ or /tmp — a slotbank cwd dump is ~26k tokens and 400s",
+        "# Two-stage: keep a cloud subscription provider for OMP's full harness.",
+        "# slotbank serve --condense is the local 27B stage (ask + citations).",
+        "# A slotbank cwd dump is ~26k tokens and 400s without --condense.",
         "providers:",
     ]
     for _, block in others:

@@ -202,6 +202,16 @@ STRATEGIES: tuple[Strategy, ...] = (
         "one chunk size. Default pack is off: overlong OMP dumps still 400.",
     ),
     Strategy(
+        "two-stage-harness",
+        IN_TREE,
+        "OMP full prompt on a cloud subscription; condensed 27B locally.",
+        "The harness blob is non-negotiable for OMP. 27B cannot prefill it on "
+        "24 GB. SLOTBANK_CONDENSE / serve --condense keeps the last ask and "
+        "file citations, logs the raw user blob when CONTEXT_DIR is set. "
+        "upsert does not invent Anthropic/OpenAI keys; it keeps sibling "
+        "providers. Pack is the lossy fallback, not this door.",
+    ),
+    Strategy(
         "hybrid-kv-dynamic-page",
         REJECTED,
         "Dynamically page/offload hybrid KV so OMP's harness fits in 24 GB.",

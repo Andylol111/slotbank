@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 
@@ -100,6 +101,161 @@ def compiled_system_message() -> str:
     return compile_msg(repo=repo)
 
 
+_FILE_CITE = re.compile(
+    r"(?:file:)?((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})"
+    r"(?::(\d+)(?:-(\d+))?)?"
+)
+_FOOTER_CHILD = re.compile(r"↳\s+(\S+)")
+
+
+def _approx_tok(text: str) -> int:
+    return max(0, (len(text) + 3) // 4)
+
+
+def _condense_on() -> bool:
+    return os.environ.get("SLOTBANK_CONDENSE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def condense_budget() -> int:
+    raw = os.environ.get("SLOTBANK_CONDENSE_BUDGET", "").strip()
+    if raw:
+        try:
+            return max(256, int(raw))
+        except ValueError:
+            pass
+    cap = max_prompt_tokens()
+    if cap:
+        return min(4096, cap)
+    return 4096
+
+
+def _cites(text: str, limit: int = 24) -> list[str]:
+    seen: list[str] = []
+    found: set[str] = set()
+    for m in _FILE_CITE.finditer(text):
+        path = m.group(1)
+        if ".." in path.split("/"):
+            continue
+        label = f"file:{path}"
+        lo, hi = m.group(2), m.group(3)
+        if lo:
+            label += f":{lo}" + (f"-{hi}" if hi else "")
+        if label not in found:
+            found.add(label)
+            seen.append(f"[{label}]")
+        if len(seen) >= limit:
+            break
+    for m in _FOOTER_CHILD.finditer(text):
+        name = m.group(1)
+        key = f"cwd-child:{name}"
+        if key not in found:
+            found.add(key)
+            seen.append(f"[{key}]")
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def _clip_tok(text: str, n: int, *, tail: bool = False) -> str:
+    if n <= 0:
+        return ""
+    chars = max(1, int(n) * 4)
+    if len(text) <= chars:
+        return text
+    return text[-chars:] if tail else text[:chars]
+
+
+def _last_ask(text: str, ask_n: int) -> tuple[str, str]:
+    """Split a dumped user blob into (head, ask). Prefer the last short paragraph."""
+    parts = re.split(r"\n\s*\n", text.rstrip())
+    if len(parts) >= 2:
+        last = parts[-1].strip()
+        if last and _approx_tok(last) <= ask_n:
+            idx = text.rfind(parts[-1])
+            return text[:idx], last
+    lines = text.rstrip().splitlines()
+    if lines:
+        last = lines[-1].strip()
+        if last and _approx_tok(last) <= min(ask_n, 256):
+            idx = text.rfind(lines[-1])
+            return text[:idx], last
+    ask = _clip_tok(text, ask_n, tail=True)
+    return text[: max(0, len(text) - len(ask))], ask
+
+
+def condense_harness_messages(
+    messages: list[dict[str, Any]],
+    *,
+    budget: int | None = None,
+) -> list[dict[str, Any]]:
+    """Local 27B stage: keep the ask + citations, not OMP's full harness blob.
+
+    The harness prompt stays intact on the cloud subscription side. This only
+    shapes what the Air prefills. Verbatim full text can still land on the
+    context-OS disk log when SLOTBANK_CONTEXT_DIR is set.
+    """
+    budget = condense_budget() if budget is None else max(64, int(budget))
+    sys_n = max(64, budget * 15 // 100)
+    cite_n = max(64, budget * 25 // 100)
+    ask_n = max(128, budget - sys_n - cite_n)
+    last_user = None
+    for i, m in enumerate(messages):
+        if (m.get("role") or "") == "user":
+            last_user = i
+    out: list[dict[str, Any]] = []
+    for i, raw in enumerate(messages):
+        m = dict(raw)
+        role = m.get("role") or "user"
+        text = _text_of(m.get("content"))
+        limit = ask_n if i == last_user else sys_n
+        if _approx_tok(text) <= limit:
+            out.append(m)
+            continue
+        if role == "system":
+            m["content"] = _clip_tok(text, sys_n) + "\n\n[harness system truncated]"
+            out.append(m)
+            continue
+        if role == "tool" or m.get("tool_call_id"):
+            cites = _cites(text)
+            m["content"] = "\n".join(cites) if cites else "[tool result omitted]"
+            out.append(m)
+            continue
+        if i == last_user:
+            head, ask = _last_ask(text, ask_n)
+            cites = _cites(head) or _cites(text)
+            dump_head = _clip_tok(head, min(24, cite_n // 4))
+            parts = []
+            if cites:
+                parts.append("Citations:\n" + "\n".join(cites))
+            if dump_head.strip():
+                parts.append(dump_head.rstrip())
+            parts.append(ask.lstrip())
+            m["content"] = "\n\n".join(parts)
+            out.append(m)
+            continue
+        m["content"] = _clip_tok(text, sys_n, tail=True)
+        out.append(m)
+    return out
+
+
+def _maybe_log_raw_user(messages: list[dict[str, Any]]) -> None:
+    root = os.environ.get("SLOTBANK_CONTEXT_DIR", "").strip()
+    if not root:
+        return
+    for m in reversed(messages):
+        if (m.get("role") or "") != "user":
+            continue
+        text = _text_of(m.get("content"))
+        if _approx_tok(text) <= condense_budget():
+            return
+        from slotbank.context_os import append
+
+        append(root, "user", text)
+        return
+
+
 # 27B 4-bit on 24 GB cannot prefill ~15k tokens (OMP footer 45%/33K).
 # 16k accepted the dump and jetsammed mid-prefill (~60s Connection error).
 # 0 disables.
@@ -194,14 +350,17 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
             "OMP footer `/tmp ↳ name` means a git repo that is a *child* of cwd "
             "was injected (e.g. /tmp/llama.cpp-dflash2). "
             "mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools. "
-            "Override: SLOTBANK_MAX_PROMPT=0 "
-            "or SLOTBANK_PROMPT_PACK=1 to keep head+tail and sample the middle."
+            "Override: SLOTBANK_MAX_PROMPT=0, SLOTBANK_CONDENSE=1 "
+            "(local two-stage), or SLOTBANK_PROMPT_PACK=1."
         )
     return ids
 
 
 def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | None) -> list[int]:
     msgs = normalize_messages(with_context_os(with_direct(messages)))
+    if _condense_on():
+        _maybe_log_raw_user(messages)
+        msgs = condense_harness_messages(msgs)
     apply = getattr(tokenizer, "apply_chat_template", None)
 
     def plain() -> list[int]:

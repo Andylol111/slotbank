@@ -255,6 +255,8 @@ def _tuning_args(p: argparse.ArgumentParser) -> None:
                    help="enable the chat template thinking block (off by default)")
     p.add_argument("--direct", action="store_true",
                    help="inject a short no-lecture system prefix (does not change weights)")
+    p.add_argument("--condense", action="store_true",
+                   help="local two-stage: condense OMP's harness blob before 27B")
     _draft_args(p)
 
 
@@ -319,6 +321,8 @@ def _apply_tuning(args) -> None:
         os.environ["SLOTBANK_THINKING"] = "1"
     if getattr(args, "direct", False):
         os.environ["SLOTBANK_DIRECT"] = "1"
+    if getattr(args, "condense", False):
+        os.environ["SLOTBANK_CONDENSE"] = "1"
     draft = getattr(args, "draft", None)
     no_draft = getattr(args, "no_draft", False) and not draft
     if no_draft:
@@ -481,6 +485,8 @@ def _omp(args) -> int:
     print(f"agent:  {agent_selector(mid)}  (tools + thinking)")
     print(f"also:   {lm_studio_selector(mid)}")
     print("then:   omp models refresh")
+    print("        two-stage: cloud subscription = full OMP harness;")
+    print("        slotbank serve --condense = local 27B (ask + citations)")
     print("        mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools")
     print("        (not ~/Desktop/slotbank; not /tmp if /tmp/<repo> exists)")
     print("        footer `/tmp ↳ name` = OMP injected that child git repo")
@@ -529,6 +535,13 @@ def _serve(args) -> int:
         f"\n  max prompt                 {cap_note} tokens "
         f"(SLOTBANK_MAX_PROMPT; 0 disables)"
     )
+    if os.environ.get("SLOTBANK_CONDENSE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        extra += (
+            "\n  condense                   on "
+            "(local two-stage; OMP's full prompt stays on the cloud provider)"
+        )
     omp_lines = ""
     if omp_path is not None:
         omp_lines = (
