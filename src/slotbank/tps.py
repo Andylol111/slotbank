@@ -235,6 +235,20 @@ STRATEGIES: tuple[Strategy, ...] = (
         "a single launch). Does not page hybrid KV or change 27B weights.",
     ),
     Strategy(
+        "omp-cold-prefill-n",
+        ADOPTED,
+        "Shrink the first OMP 27B tile: 256-token system head, 2 GiB prefill allocator.",
+        "Cold TTFT is N / ~48 tok/s on this Air, one launch. Envelope kept "
+        "15% of 8192 ≈ 1228 tokens of OMP system on every first hi (~25 s) "
+        "before the ask. Cloud still has the full harness. ENVELOPE_SYS_TOKENS "
+        "is 256 on every turn (not only short asks) so PrefixCache still hits. "
+        "mlx#3350: a 512 MiB free-cache forces Metal malloc per layer during "
+        "the tile. Prefill raises the pool to 2048 MiB, then restores 512 so "
+        "idle activations do not sit at peak. SLOTBANK_CACHE_LIMIT_MIB still "
+        "caps both if set. Does not page hybrid KV, requantize, or change "
+        "27B weights. Unmeasured on the Air.",
+    ),
+    Strategy(
         "metal-qmm-prefill",
         DEFERRED,
         "4-bit QMM of the 15 GiB pack is most of remaining prefill time.",

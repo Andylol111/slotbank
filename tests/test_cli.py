@@ -339,6 +339,36 @@ def test_encode_chat_followup_shares_pre_switch_prefix(monkeypatch):
     monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
 
 
+def test_condense_envelope_caps_system_head(monkeypatch):
+    """First OMP hi used to keep ~1228 tokens of harness (15% of 8k)."""
+    from slotbank.prompt import ENVELOPE_SYS_TOKENS, condense_harness_messages
+
+    fat = "You are OMP. " + ("tools " * 4000)
+    dump = "file:src/foo.py:1-80\n" + ("LINE\n" * 4000) + "\n\nhi"
+    msgs = [
+        {"role": "system", "content": fat},
+        {"role": "user", "content": dump},
+    ]
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+    wide = condense_harness_messages(msgs, budget=8192)
+    assert (len(wide[0]["content"]) + 3) // 4 > ENVELOPE_SYS_TOKENS
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    got = condense_harness_messages(msgs, budget=8192)
+    assert (len(got[0]["content"]) + 3) // 4 <= ENVELOPE_SYS_TOKENS + 8
+    assert "hi" in got[1]["content"]
+    # Same cap after a long follow-up, or PrefixCache misses the head.
+    follow = condense_harness_messages(
+        [
+            {"role": "system", "content": fat},
+            {"role": "user", "content": dump},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "please explain this in more detail " * 20},
+        ],
+        budget=8192,
+    )
+    assert got[0]["content"] == follow[0]["content"]
+
+
 def test_condense_keeps_ask_and_cites_the_dump():
     """Local stage: OMP may send the full harness; 27B gets the ask + citations."""
     from slotbank.prompt import condense_harness_messages
