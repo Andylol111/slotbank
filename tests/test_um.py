@@ -169,6 +169,30 @@ def test_pyramid_step_keeps_early_tiles_large(monkeypatch):
     assert _pyramid_step(512, 0, 10240) == 512
 
 
+def test_cut_prefill_tile_takes_soonest_snap():
+    from slotbank.runtime import _cut_prefill_tile
+
+    # Unordered set used to pick 1024 before 512 and skip the 512 copy.
+    assert _cut_prefill_tile(2048, 0, 7999, {512, 1024, 2048}) == 512
+    assert _cut_prefill_tile(2048, 0, 7999, {2048}) == 2048
+    assert _cut_prefill_tile(2048, 0, 249, {128}) == 128
+    assert _cut_prefill_tile(2048, 128, 249, {128}) == 249
+    # 8k envelope: one 2048 stop, not three crumbs.
+    def tiles(snaps):
+        off, n, ends = 0, 0, []
+        while off < 7999:
+            nxt = _cut_prefill_tile(2048, off, 7999, snaps)
+            ends.append(nxt)
+            n += 1
+            off = nxt
+        return n, ends
+
+    n_new, ends_new = tiles({2048})
+    n_old, _ = tiles({512, 1024, 2048})
+    assert n_new < n_old
+    assert ends_new[0] == 2048
+
+
 def test_dense_runtime_does_not_clamp_prefill_to_512():
     from types import SimpleNamespace
 

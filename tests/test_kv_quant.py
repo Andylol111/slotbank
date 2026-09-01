@@ -113,15 +113,20 @@ def test_snap_points_keep_large_heads(monkeypatch):
     rt = _rt(monkeypatch, SLOTBANK_PREFIX_CACHE="1")
     rt._prompt_ids = list(range(8000))
     pts = rt._snap_points(0, 7999)
-    assert pts == {512, 1024, 2048}
+    # 256/512/1024 crumbs used to split the first 2k into extra 27B forwards.
+    assert pts == {2048}
     packed_head = rt._snap_points(0, 3000)
-    assert 2048 in packed_head
+    assert packed_head == {2048}
     assert 128 not in packed_head
     assert 256 not in packed_head
+    assert 512 not in packed_head
     # Short OMP "hi": full prefix_n includes the generation-prompt token,
     # which the next turn does not start with. 128 sits inside the system head.
     short = rt._snap_points(0, 249)
     assert short == {128}
+    # A short prompt that already fits in one tile still snaps at 128, not 256.
+    mid = rt._snap_points(0, 1800)
+    assert mid == {128}
 
 
 def test_shed_keeps_dflash_session(monkeypatch):

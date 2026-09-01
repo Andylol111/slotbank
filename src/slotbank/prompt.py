@@ -447,8 +447,8 @@ def keep_token_ids(ids: list[int], cap: int) -> list[int]:
     the PyramidKV + BUZZ + TriAttention idea applied to *what gets prefills*,
     not to Gated DeltaNet state.
 
-    Head length is snapped to 512, 1024, 2048, ... so PrefixCache on the
-    MTP path can restore it. 25% of the 8k envelope is 2048, a snap.
+    Head length is snapped to 512, 1024, 2048, ... The 8k envelope's 25%
+    sink is 2048, which is PrefixCache.MAX_SNAP on the long-prompt path.
     """
     n = len(ids)
     if n <= cap or cap <= 0:
