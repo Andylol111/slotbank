@@ -109,6 +109,16 @@ _SSE_HEADERS = {
 }
 
 
+def llama_model_status(engine) -> dict[str, Any]:
+    """llama.cpp router ``data[].status`` so OMP does not treat us as unloaded."""
+    err = getattr(engine, "load_error", None)
+    if err:
+        return {"value": "failed", "message": str(err)}
+    if getattr(engine, "loading", False):
+        return {"value": "loading"}
+    return {"value": "loaded"}
+
+
 def models_payload(engine) -> dict[str, Any]:
     """OpenAI ``GET /v1/models`` plus llama.cpp native fields OMP 18 parses."""
     ctx = int(getattr(engine, "context_window", 0) or DEFAULT_CONTEXT_WINDOW)
@@ -125,6 +135,7 @@ def models_payload(engine) -> dict[str, Any]:
             "context_length": ctx,
             "meta": {"n_ctx": ctx, "n_ctx_train": ctx},
             "architecture": {"input_modalities": modalities},
+            "status": llama_model_status(engine),
         }],
     }
 

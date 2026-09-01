@@ -55,6 +55,7 @@ def test_llama_cpp_native_discovery_skips_auth(monkeypatch):
     body = models.json()
     assert body["data"][0]["id"] == "toy"
     assert body["data"][0]["meta"]["n_ctx"] == 32768
+    assert body["data"][0]["status"]["value"] == "loaded"
     assert body["data"][0]["architecture"]["input_modalities"] == ["text"]
     assert c.get("/v1/models").json()["data"][0]["id"] == "toy"
     props = c.get("/props")
@@ -82,6 +83,7 @@ def test_health_reports_loading():
     assert listed.status_code == 200
     assert listed.json()["data"][0]["id"] == "Qwen3.8-27B-4bit"
     assert listed.json()["data"][0]["meta"]["n_ctx"] == 32768
+    assert listed.json()["data"][0]["status"]["value"] == "loading"
     assert client.get("/props").json()["n_ctx"] == 32768
     proxy = EngineProxy(LoadingEngine("a"))
     assert proxy.model_id == "a"
@@ -110,6 +112,32 @@ def test_loading_chat_is_503_not_400():
     )
     assert chat.status_code == 503
     assert chat.json()["error"]["type"] == "overloaded_error"
+
+
+def test_llama_cpp_models_load_waits_out_loading(monkeypatch):
+    """OMP 18.0.11 llama.cpp pane POSTs /models/load and spins until loaded."""
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import slotbank.api.messages as messages
+    from slotbank.api.app import EngineProxy, LoadingEngine, create_app
+
+    monkeypatch.setattr(messages, "LOAD_WAIT_S", 2.0)
+    proxy = EngineProxy(LoadingEngine("Qwen3.8-27B-4bit"))
+    c = TestClient(create_app(proxy))
+    assert c.get("/models").json()["data"][0]["status"]["value"] == "loading"
+
+    def boot() -> None:
+        time.sleep(0.12)
+        proxy.replace(FakeEngine())
+
+    threading.Thread(target=boot, daemon=True).start()
+    r = c.post("/models/load", json={"model": "Qwen3.8-27B-4bit"})
+    assert r.status_code == 200, r.text
+    assert r.json()["success"] is True
+    assert c.get("/models").json()["data"][0]["status"]["value"] == "loaded"
 
 
 def test_openai_stream_waits_out_loading(monkeypatch):

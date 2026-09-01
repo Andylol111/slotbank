@@ -6,11 +6,11 @@ from fastapi.responses import JSONResponse
 from slotbank.api.chat import llama_props_payload, models_payload, register_chat
 from slotbank.api.messages import register_messages
 from slotbank.api.responses import register_responses
-from slotbank.load import EngineNotReady
+from slotbank.load import EngineNotReady, poll_until_ready
 from slotbank.omp import DEFAULT_CONTEXT_WINDOW
 
 _OPEN_PATHS = frozenset({
-    "/health", "/", "/models", "/props", "/v1/models",
+    "/health", "/", "/models", "/models/load", "/props", "/v1/models",
 })
 
 
@@ -107,6 +107,7 @@ def create_app(engine, *, api_key: str | None = None) -> FastAPI:
                 "/v1/completions",
                 "/v1/models",
                 "/models",
+                "/models/load",
                 "/props",
                 "/v1/messages",
                 "/v1/messages/count_tokens",
@@ -117,6 +118,31 @@ def create_app(engine, *, api_key: str | None = None) -> FastAPI:
     @app.get("/models")
     def native_models():
         return models_payload(app.state.engine)
+
+    @app.post("/models/load")
+    def native_models_load():
+        """OMP llama.cpp router POSTs this when a run starts.
+
+        Block until Metal is up (or 180s) so the picker leaves 'loading'
+        instead of hanging on a 404.
+        """
+        from slotbank.api.messages import LOAD_WAIT_S
+
+        try:
+            for _ in poll_until_ready(
+                app.state.engine, timeout=LOAD_WAIT_S, ping_s=0.25,
+            ):
+                pass
+        except EngineNotReady as exc:
+            return JSONResponse(
+                {
+                    "success": False,
+                    "error": {"message": str(exc), "type": "overloaded_error"},
+                },
+                503,
+                headers={"Retry-After": "15"},
+            )
+        return {"success": True}
 
     @app.get("/props")
     def native_props():
