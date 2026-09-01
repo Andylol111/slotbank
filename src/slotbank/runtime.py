@@ -617,6 +617,23 @@ def _cache_states(cache):
     return cache
 
 
+def prefill_forward(fwd, chunk, cache) -> None:
+    """One prefill tile. Skip lm_head — we only need the cache for TTFT.
+
+    Qwen3.8 vocab is 248320. mlx-vlm LanguageModel.__call__(skip_logits=True)
+    omits that matmul. Older wrappers TypeError; fall back to a full call.
+    """
+    try:
+        fwd(chunk, cache=cache, skip_logits=True)
+        return
+    except TypeError:
+        pass
+    try:
+        fwd(chunk, cache=cache)
+    except TypeError:
+        fwd(inputs=chunk, cache=cache)
+
+
 def _compile_logprobs():
     import mlx.core as mx
 
@@ -1033,10 +1050,7 @@ class Runtime:
                     break
             with mx.stream(stream):
                 chunk = prompt[offset:chunk_end][None]
-                try:
-                    fwd(chunk, cache=cache)
-                except TypeError:
-                    fwd(inputs=chunk, cache=cache)
+                prefill_forward(fwd, chunk, cache)
                 states = _cache_states(cache)
                 if states is not None:
                     mx.eval(states)

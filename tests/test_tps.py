@@ -15,6 +15,7 @@ from slotbank.tps import (
     draft_accept_rate,
     get,
     pack_read_ceiling_toks,
+    prefill_seconds,
     read_attempts,
     register_attempt,
     scale_draft_block,
@@ -55,6 +56,11 @@ def test_catalog_sound():
     assert get("skip-vlm-rope-prime").needs_trim_cache is False
     assert get("omp-defer-weight-pin").status == ADOPTED
     assert get("omp-defer-weight-pin").needs_trim_cache is False
+    assert get("ttft-is-prefill").status == ADOPTED
+    assert get("skip-lm-head-prefill").status == ADOPTED
+    assert get("spec-prefill-sparse").status == REJECTED
+    assert get("async-prefill-pipeline").status != ADOPTED
+    assert get("warm-prefix-at-load").status != ADOPTED
     assert len(STRATEGIES) >= 10
 
 
@@ -73,6 +79,36 @@ def test_pack_read_ceiling_is_under_ten():
     # without extra accepted tokens per 27B forward, which DFlash@8 already lost.
     assert M4_AIR_24G["mtp_k3_count"] > ceil
     assert M4_AIR_24G["mtp_k3_count"] < 20
+
+
+def test_prefill_seconds_matches_measured_819():
+    assert prefill_seconds(819) == pytest.approx(17.0, rel=0.02)
+    assert prefill_seconds(819, reuse=819) == 0.0
+    # Follow-up that hits the 2048 snap and prefills a short suffix.
+    assert prefill_seconds(2100, reuse=2048) < 2.0
+
+
+def test_prefill_forward_skips_logits():
+    from slotbank.runtime import prefill_forward
+
+    seen: dict = {}
+
+    def fwd(chunk, cache=None, **k):
+        seen["k"] = k
+        seen["chunk"] = chunk
+        seen["cache"] = cache
+
+    prefill_forward(fwd, "ids", "kv")
+    assert seen["k"].get("skip_logits") is True
+    assert seen["chunk"] == "ids" and seen["cache"] == "kv"
+
+    seen.clear()
+
+    def old_fwd(chunk, cache=None):
+        seen["plain"] = True
+
+    prefill_forward(old_fwd, "ids", "kv")
+    assert seen.get("plain") is True
 
 
 def test_scale_draft_block_never_exceeds_trained_k():
