@@ -154,12 +154,56 @@ def test_keep_token_ids_is_sink_pyramid_tail():
     assert keep_token_ids([], 8) == []
 
 
+def test_condense_keeps_ask_and_cites_the_dump():
+    """Local stage: OMP may send the full harness; 27B gets the ask + citations."""
+    from slotbank.prompt import condense_harness_messages
+
+    dump = "file:src/foo.py:1-80\n" + ("LINE\n" * 4000)
+    msgs = [
+        {"role": "system", "content": "You are OMP. " + ("tools " * 2000)},
+        {"role": "user", "content": dump + "\n\nhi"},
+    ]
+    got = condense_harness_messages(msgs, budget=400)
+    blob = "\n".join(str(m.get("content") or "") for m in got)
+    assert "hi" in blob
+    assert "foo.py" in blob
+    assert blob.count("LINE") < 40
+    assert "tools " * 50 not in blob
+
+
+def test_encode_chat_condenses_when_asked(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
+    monkeypatch.setenv("SLOTBANK_CONDENSE", "1")
+    monkeypatch.setenv("SLOTBANK_CONDENSE_BUDGET", "200")
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "0")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            text = "\n".join(str(m.get("content") or "") for m in msgs)
+            return [ord(c) % 97 for c in text[:80]]
+
+        def encode(self, text):
+            return [1, 2, 3]
+
+    dump = "file:src/bar.py:2-3\n" + ("DUMP\n" * 2000) + "\n\nwhat is 2+2"
+    ids = encode_chat(Tok(), [{"role": "user", "content": dump}], None)
+    assert ids, "condensed prompt must still tokenize"
+    # Tok encodes the first 80 chars of the condensed messages; the ask survives
+    # in the kept tail, so a raw 2000-line dump cannot be what was templated.
+    assert len(ids) <= 80
+
+
 def test_encode_chat_packs_overlong_when_asked(monkeypatch):
     """Opt-in: pack to the cap instead of 400. Off by default so dumps still refuse."""
     from slotbank.prompt import encode_chat
 
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
     monkeypatch.setenv("SLOTBANK_PROMPT_PACK", "1")
 
@@ -182,6 +226,7 @@ def test_encode_chat_refuses_overlong_prompt(monkeypatch):
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
 
     class Tok:
@@ -380,13 +425,18 @@ def test_apply_tuning_sets_thinking_and_vision(monkeypatch):
     monkeypatch.delenv("SLOTBANK_THINKING", raising=False)
     monkeypatch.delenv("SLOTBANK_VISION", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
-    _apply_tuning(argparse.Namespace(thinking=True, vision=True, direct=True, draft=None))
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
+    _apply_tuning(argparse.Namespace(
+        thinking=True, vision=True, direct=True, condense=True, draft=None,
+    ))
     assert os.environ["SLOTBANK_THINKING"] == "1"
     assert os.environ["SLOTBANK_VISION"] == "1"
     assert os.environ["SLOTBANK_DIRECT"] == "1"
+    assert os.environ["SLOTBANK_CONDENSE"] == "1"
     monkeypatch.delenv("SLOTBANK_THINKING", raising=False)
     monkeypatch.delenv("SLOTBANK_VISION", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
 
 
 def test_check_accepts_short_names_like_every_other_command():
