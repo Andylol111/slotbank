@@ -7,6 +7,7 @@ from slotbank.api.chat import llama_props_payload, models_payload, register_chat
 from slotbank.api.messages import register_messages
 from slotbank.api.responses import register_responses
 from slotbank.load import EngineNotReady
+from slotbank.omp import DEFAULT_CONTEXT_WINDOW
 
 _OPEN_PATHS = frozenset({
     "/health", "/", "/models", "/props", "/v1/models",
@@ -17,7 +18,7 @@ class LoadingEngine:
     """Serves discovery while the real Engine thread loads weights."""
 
     def __init__(self, model_id: str, *, error: str | None = None,
-                 context_window: int = 16384):
+                 context_window: int = DEFAULT_CONTEXT_WINDOW):
         self.model_id = model_id
         self.context_window = context_window
         self.loading = error is None

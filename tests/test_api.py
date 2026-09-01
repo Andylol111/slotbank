@@ -43,8 +43,8 @@ def test_models_list_matches_omp_discovery():
     assert row["owned_by"] == "slotbank"
     assert "anthropic" in row["supported_endpoint_types"]
     assert "openai" in row["supported_endpoint_types"]
-    assert row["max_model_len"] == 16384
-    assert row["meta"]["n_ctx"] == 16384
+    assert row["max_model_len"] == 32768
+    assert row["meta"]["n_ctx"] == 32768
 
 
 def test_llama_cpp_native_discovery_skips_auth(monkeypatch):
@@ -54,14 +54,14 @@ def test_llama_cpp_native_discovery_skips_auth(monkeypatch):
     assert models.status_code == 200
     body = models.json()
     assert body["data"][0]["id"] == "toy"
-    assert body["data"][0]["meta"]["n_ctx"] == 16384
+    assert body["data"][0]["meta"]["n_ctx"] == 32768
     assert body["data"][0]["architecture"]["input_modalities"] == ["text"]
     assert c.get("/v1/models").json()["data"][0]["id"] == "toy"
     props = c.get("/props")
     assert props.status_code == 200
     p = props.json()
-    assert p["n_ctx"] == 16384
-    assert p["default_generation_settings"]["n_ctx"] == 16384
+    assert p["n_ctx"] == 32768
+    assert p["default_generation_settings"]["n_ctx"] == 32768
     assert p["default_generation_settings"]["params"]["max_tokens"] == -1
     assert p["default_generation_settings"]["params"]["n_predict"] == -1
     assert p["modalities"]["vision"] is False
@@ -81,7 +81,8 @@ def test_health_reports_loading():
     listed = client.get("/models")
     assert listed.status_code == 200
     assert listed.json()["data"][0]["id"] == "Qwen3.8-27B-4bit"
-    assert client.get("/props").status_code == 200
+    assert listed.json()["data"][0]["meta"]["n_ctx"] == 32768
+    assert client.get("/props").json()["n_ctx"] == 32768
     proxy = EngineProxy(LoadingEngine("a"))
     assert proxy.model_id == "a"
     proxy.replace(FakeEngine())
@@ -109,6 +110,43 @@ def test_loading_chat_is_503_not_400():
     )
     assert chat.status_code == 503
     assert chat.json()["error"]["type"] == "overloaded_error"
+
+
+def test_openai_stream_waits_out_loading(monkeypatch):
+    """OMP's llama.cpp picker streams /v1/chat/completions, not Anthropic.
+
+    Tokenizing before the SSE starts 503s the first hi while Metal loads.
+    """
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+
+    import slotbank.api.messages as messages
+    from slotbank.api.app import EngineProxy, LoadingEngine, create_app
+
+    monkeypatch.setattr(messages, "STREAM_PING_S", 0.05)
+    monkeypatch.setattr(messages, "LOAD_WAIT_S", 2.0)
+    proxy = EngineProxy(LoadingEngine("Qwen3.8-27B-4bit"))
+
+    def boot() -> None:
+        time.sleep(0.12)
+        proxy.replace(FakeEngine())
+
+    threading.Thread(target=boot, daemon=True).start()
+    r = TestClient(create_app(proxy, api_key="k")).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer k"},
+        json={
+            "model": "Qwen3.8-27B-4bit",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert ": ping" in r.text
+    assert "hi" in r.text
+    assert "[DONE]" in r.text
 
 
 def test_anthropic_stream_waits_out_loading(monkeypatch):
