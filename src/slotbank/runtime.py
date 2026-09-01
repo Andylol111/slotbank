@@ -1041,14 +1041,16 @@ class Runtime:
 
         Hybrid GDN cannot trim, so a reusable prefix must land exactly where
         prefill stopped. Packed OMP turns share ~20% (the sink head, ~2048
-        tokens at the 10k cap), not 128. Keep the largest few boundaries;
-        put() also stores prefix_n when it fits in SLOTBANK_PREFIX_CACHE_MIB.
+        tokens at the 10k cap). Short follow-ups share only the system head;
+        128/256 sit inside that when the full prefix_n includes a generation
+        prompt token the next turn does not start with. Keep the largest few
+        boundaries; put() also stores prefix_n when it fits.
         """
         if self._prefix is None:
             return set()
         src = ids if ids is not None else self._prompt_ids
         pts: list[int] = []
-        n = 512
+        n = 128
         while n < prefix_n:
             if n > start:
                 pts.append(n)
