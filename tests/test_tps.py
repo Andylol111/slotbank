@@ -49,6 +49,10 @@ def test_catalog_sound():
     assert get("omp-session-vs-metal").needs_trim_cache is False
     assert get("qwen-no-think-prompt").status == ADOPTED
     assert get("qwen-no-think-prompt").needs_trim_cache is False
+    assert get("dais-reset-each-request").status == ADOPTED
+    assert get("dais-reset-each-request").needs_trim_cache is False
+    assert get("skip-vlm-rope-prime").status == ADOPTED
+    assert get("skip-vlm-rope-prime").needs_trim_cache is False
     assert len(STRATEGIES) >= 10
 
 
@@ -133,6 +137,34 @@ def test_retune_draft_block_shrinks_on_low_accept(monkeypatch):
     rt._draft_block = 3
     rt._retune_draft_block()
     assert rt._draft_block == 3
+
+
+def test_arm_draft_block_resets_poisoned_k():
+    from types import SimpleNamespace
+
+    from slotbank.runtime import Runtime
+
+    rt = Runtime(SimpleNamespace(model_path="x", prefill_step_size=512))
+    rt._draft = object()
+    rt._draft_cap = 3
+    rt._draft_block = 1
+    rt._arm_draft_block()
+    assert rt._draft_block == 3
+    rt._draft_cap = None
+    rt._draft_block = 2
+    rt._arm_draft_block()
+    assert rt._draft_block == 2
+
+
+def test_iter_draft_starts_at_cap_and_skips_dead_rope_prime():
+    import inspect
+
+    from slotbank.runtime import Runtime
+
+    src = inspect.getsource(Runtime._iter_draft)
+    assert "_arm_draft_block" in src
+    assert "mlx_vlm.generate.dispatch" not in src
+    assert "_retune_draft_block" not in src
 
 
 def test_draft_report_empty_without_drafter():

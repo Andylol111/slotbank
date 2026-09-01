@@ -104,10 +104,32 @@ STRATEGIES: tuple[Strategy, ...] = (
     Strategy(
         "dais-trained-cap",
         ADOPTED,
-        "Shrink K when accept rate is poor; never exceed the drafter's trained block.",
-        "mlx-vlm already backs off DFlash depth. slotbank.tps.scale_draft_block is the "
-        "same rule for MTP (cap 3). Growing past trained K is how block 6 lost on 4B MTP.",
+        "Never exceed the drafter's trained block. Daily 27B uses that cap every request.",
+        "mlx-vlm already backs off DFlash depth. scale_draft_block is the same cap for "
+        "MTP (3). Growing past trained K is how block 6 lost on 4B MTP. generate_step "
+        "reads K once, so shrinking after a round cannot help that round — see "
+        "dais-reset-each-request.",
         extra_drafter=True,
+    ),
+    Strategy(
+        "dais-reset-each-request",
+        ADOPTED,
+        "Arm MTP/DFlash at the trained K at the start of every generate, not last-turn DAIS.",
+        "DAIS persist left follow-up OMP turns at K=1 after a low-accept think dump "
+        "(~greedy 5.7 instead of MTP ~13). generate_step cannot retune mid-round. "
+        "_arm_draft_block restores the cap (3 on sidecar MTP) each _iter_draft. "
+        "Does not change 27B weights or page hybrid KV.",
+        extra_drafter=True,
+    ),
+    Strategy(
+        "skip-vlm-rope-prime",
+        ADOPTED,
+        "Do not prime Qwen mRoPE on the full prompt before mlx-vlm generate_step.",
+        "mlx-vlm's helper writes mRoPE onto the LM and into kwargs. generate_step then "
+        "nulls _position_ids/_rope_deltas, and we never passed the kwargs in. On the 8k "
+        "envelope it was get_rope_index of the whole prompt, then discard. Pyramid "
+        "tiles + last-token generate_step continue from cache offset. Does not page "
+        "hybrid KV.",
     ),
     Strategy(
         "suffix-prefix-reuse",

@@ -142,7 +142,6 @@ def test_iter_draft_records_fed_when_consumer_stops(monkeypatch):
     """
     pytest.importorskip("mlx.core")
     ar = pytest.importorskip("mlx_vlm.generate.ar")
-    dispatch = pytest.importorskip("mlx_vlm.generate.dispatch")
     vlm_cache = pytest.importorskip("mlx_vlm.models.cache")
     from slotbank.runtime import draft_feed
     from slotbank.types import SamplingParams
@@ -153,7 +152,6 @@ def test_iter_draft_records_fed_when_consumer_stops(monkeypatch):
         yield 33, None
 
     monkeypatch.setattr(ar, "generate_step", generate_step)
-    monkeypatch.setattr(dispatch, "_prime_cached_prefix_rope_state", lambda *a, **k: True)
     monkeypatch.setattr(vlm_cache, "make_prompt_cache", lambda *_a, **_k: ["new"])
 
     rt = _rt(monkeypatch, SLOTBANK_DRAFT="/tmp/dflash")
@@ -184,7 +182,6 @@ def test_iter_draft_records_fed_when_consumer_stops(monkeypatch):
 def test_iter_draft_keeps_live_cache_on_append(monkeypatch):
     pytest.importorskip("mlx.core")
     ar = pytest.importorskip("mlx_vlm.generate.ar")
-    dispatch = pytest.importorskip("mlx_vlm.generate.dispatch")
     vlm_cache = pytest.importorskip("mlx_vlm.models.cache")
     from slotbank.types import SamplingParams
 
@@ -194,13 +191,13 @@ def test_iter_draft_keeps_live_cache_on_append(monkeypatch):
     def generate_step(ids, *_a, **k):
         seen["ids"] = [int(x) for x in ids.flatten().tolist()]
         seen["cache"] = k.get("prompt_cache")
+        seen["draft_block_size"] = k.get("draft_block_size")
         yield 7, None
 
     def prefill(ids, cache, start, end, *, commit_fed):
         prefills.append((start, end, commit_fed, cache))
 
     monkeypatch.setattr(ar, "generate_step", generate_step)
-    monkeypatch.setattr(dispatch, "_prime_cached_prefix_rope_state", lambda *a, **k: True)
     monkeypatch.setattr(vlm_cache, "make_prompt_cache", lambda *_a, **_k: ["new"])
 
     rt = _rt(monkeypatch, SLOTBANK_DRAFT="/tmp/dflash")
@@ -212,6 +209,8 @@ def test_iter_draft_keeps_live_cache_on_append(monkeypatch):
     rt._eos_token_ids = {7}
     rt._dflash_cache = ["keep"]
     rt._fed_ids = [10, 20, 30, 11, 22]
+    rt._draft_cap = 3
+    rt._draft_block = 1
     rt._cancelled = False
     rt._total_generated = 0
     rt._prefill_ids = prefill
@@ -220,13 +219,13 @@ def test_iter_draft_keeps_live_cache_on_append(monkeypatch):
     assert [s.token_id for s in steps] == [7]
     assert seen["cache"] == ["keep"]
     assert seen["ids"] == [41]
+    assert seen["draft_block_size"] == 3
     assert prefills == [(5, 6, False, ["keep"])]
 
 
 def test_iter_draft_restores_prefix_when_omp_reencodes(monkeypatch):
     pytest.importorskip("mlx.core")
     ar = pytest.importorskip("mlx_vlm.generate.ar")
-    dispatch = pytest.importorskip("mlx_vlm.generate.dispatch")
     vlm_cache = pytest.importorskip("mlx_vlm.models.cache")
     from slotbank.runtime import PrefixCache
     from slotbank.types import SamplingParams
@@ -255,7 +254,6 @@ def test_iter_draft_restores_prefix_when_omp_reencodes(monkeypatch):
         prefills.append((start, end, commit_fed))
 
     monkeypatch.setattr(ar, "generate_step", generate_step)
-    monkeypatch.setattr(dispatch, "_prime_cached_prefix_rope_state", lambda *a, **k: True)
     monkeypatch.setattr(vlm_cache, "make_prompt_cache", make_cache)
 
     stored = list(range(40))
