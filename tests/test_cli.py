@@ -415,7 +415,7 @@ def test_enable_serve_envelope_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("SLOTBANK_CONTEXT_DIR", str(tmp_path))
     for k in (
         "SLOTBANK_ENVELOPE", "SLOTBANK_CONDENSE", "SLOTBANK_PROMPT_PACK",
-        "SLOTBANK_PREFIX_CACHE", "SLOTBANK_MAX_PROMPT",
+        "SLOTBANK_PREFIX_CACHE", "SLOTBANK_PREFIX_CACHE_MIB", "SLOTBANK_MAX_PROMPT",
     ):
         monkeypatch.delenv(k, raising=False)
     _enable_serve_envelope(SimpleNamespace(no_envelope=False))
@@ -423,6 +423,7 @@ def test_enable_serve_envelope_defaults(tmp_path, monkeypatch):
     assert os.environ["SLOTBANK_CONDENSE"] == "1"
     assert os.environ["SLOTBANK_PROMPT_PACK"] == "1"
     assert os.environ["SLOTBANK_PREFIX_CACHE"] == "1"
+    assert os.environ["SLOTBANK_PREFIX_CACHE_MIB"] == "1024"
     assert max_prompt_tokens() == DEFAULT_ENVELOPE_MAX_PROMPT
     _enable_serve_envelope(argparse.Namespace(no_envelope=True))
     assert os.environ["SLOTBANK_ENVELOPE"] == "0"

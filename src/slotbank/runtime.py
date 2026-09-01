@@ -41,6 +41,30 @@ def draft_feed(fed: list[int], ids: list[int], has_cache: bool) -> tuple[int, li
     return (reuse, feed) if feed else (0, ids)
 
 
+def draft_reuse(
+    fed: list[int],
+    ids: list[int],
+    has_cache: bool,
+    stored_prefix: list[int] | None = None,
+) -> tuple[int, list[int]]:
+    """Live append first; else an exact PrefixCache snapshot. Never a partial trim.
+
+    OMP re-encodes the whole chat each turn, so `_fed_ids` (prompt + generated
+    ids) is usually not a prefix of the new prompt. The system head is. Restore
+    that snapshot into a *new* cache; the live cache still holds extra tokens.
+    """
+    reuse, feed = draft_feed(fed, ids, has_cache)
+    if reuse > 0:
+        return reuse, feed
+    if not stored_prefix:
+        return 0, ids
+    n = len(stored_prefix)
+    if n < PrefixCache.MIN_PREFIX or n >= len(ids) or ids[:n] != stored_prefix:
+        return 0, ids
+    feed = ids[n:]
+    return (n, feed) if feed else (0, ids)
+
+
 def dflash_session_ok(cache, fed_n: int) -> bool:
     """False when attention-layer offset disagrees with tokens we recorded.
 
@@ -435,19 +459,39 @@ def _copy_state(st):
     """Deep-copy a cache state, preserving container type.
 
     ArraysCache assigns into its state by index, so a tuple breaks restore.
+    QuantizedKVCache nests `(w, scales, biases)` inside `(keys, values)` —
+    one-level copy would alias the inner arrays to the live cache.
     """
     import mlx.core as mx
 
     if isinstance(st, (tuple, list)):
-        items = [mx.array(a) if hasattr(a, "shape") else a for a in st]
+        items = [_copy_state(a) for a in st]
         return tuple(items) if isinstance(st, tuple) else items
     return mx.array(st) if hasattr(st, "shape") else st
 
 
 def _state_bytes(st) -> int:
     if isinstance(st, (tuple, list)):
-        return sum(int(a.nbytes) for a in st if hasattr(a, "nbytes"))
+        return sum(_state_bytes(a) for a in st)
     return int(st.nbytes) if hasattr(st, "nbytes") else 0
+
+
+def _prefix_budget_bytes() -> int:
+    """SLOTBANK_PREFIX_CACHE_MIB: RAM for copied prefix snapshots.
+
+    16 full-attn layers are ~64 KiB/token; GDN ArraysCache is ~150 MiB O(1).
+    A 10k envelope prefix is ~790 MiB. Default 1024 MiB so that snapshot
+    fits; 512 MiB used to reject the full head and only keep 128/256.
+    """
+    import os
+
+    raw = os.environ.get("SLOTBANK_PREFIX_CACHE_MIB", "").strip()
+    if raw:
+        try:
+            return max(64, int(raw)) << 20
+        except ValueError:
+            pass
+    return 1024 << 20
 
 
 class PrefixCache:
@@ -459,11 +503,10 @@ class PrefixCache:
     """
 
     MIN_PREFIX = 32
-    BLOCK = 128          # snapshot boundary; reuse is block-granular
 
-    def __init__(self, max_entries: int = 4, max_bytes: int = 512 << 20):
+    def __init__(self, max_entries: int = 4, max_bytes: int | None = None):
         self.max_entries = max_entries
-        self.max_bytes = max_bytes
+        self.max_bytes = _prefix_budget_bytes() if max_bytes is None else max_bytes
         self._entries: list = []          # [(ids, states, nbytes)]
         self.hits = 0
         self.saved_tokens = 0
@@ -496,15 +539,33 @@ class PrefixCache:
             nbytes += _state_bytes(st)
         if nbytes > self.max_bytes:
             return 0
-        flat = [a for st, _m in states for a in (st if isinstance(st, tuple) else (st,))
-                if hasattr(a, "shape")]
+        flat = []
+        stack = [st for st, _m in states]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, (tuple, list)):
+                stack.extend(cur)
+            elif hasattr(cur, "shape"):
+                flat.append(cur)
         if flat:
             mx.eval(*flat)
         self._entries.append((list(ids), states, nbytes))
-        while len(self._entries) > self.max_entries or \
-                sum(e[2] for e in self._entries) > self.max_bytes:
-            self._entries.pop(0)
+        self._evict()
         return nbytes
+
+    def _evict(self) -> None:
+        """Drop the shortest snapshot first so a 10k system head outlives 128-token crumbs."""
+        while (
+            len(self._entries) > self.max_entries
+            or sum(e[2] for e in self._entries) > self.max_bytes
+        ):
+            if len(self._entries) <= 1:
+                return
+            i = min(
+                range(len(self._entries)),
+                key=lambda j: (len(self._entries[j][0]), self._entries[j][2], j),
+            )
+            self._entries.pop(i)
 
     def restore(self, cache, states) -> None:
         for c, (st, meta) in zip(cache, states):
@@ -588,19 +649,11 @@ class Runtime:
         self._spec_ok = None
         self._warmed = 0
         self._total_generated = 0
-        # ponytail: PrefixCache stores states via _copy_state, which copies one
-        # level deep -- a QuantizedKVCache's nested (w, scales, biases) tuples
-        # would be aliased to the live cache, not copied. Cross-request prefix
-        # sharing is therefore off when quantising. Within-session reuse is
-        # unaffected: that path keeps self._cache and never round-trips state.
-        # Upgrade path: teach _copy_state/_state_bytes to recurse and have
-        # restore() rebuild the entry with the saved cache class.
+        # PrefixCache copies via _copy_state, which recurses into nested
+        # (w, scales, biases) so 8-bit KV snapshots do not alias the live cache.
         self._kv_bits = _kv_bits(um)
         self._kv_start = _kv_quant_start(um)
-        self._prefix = (
-            None if (_prefix_disabled() or self._kv_bits is not None)
-            else PrefixCache()
-        )
+        self._prefix = None if _prefix_disabled() else PrefixCache()
         self._wired = 0
         self._draft = None
         self._draft_kind = "dflash"
@@ -856,7 +909,6 @@ class Runtime:
         self._warm(self._model)
 
     def start_request(self, input_ids: list[int], sampling_params: SamplingParams) -> None:
-        import mlx.core as mx
         from mlx_lm.models.cache import make_prompt_cache
         from mlx_lm.sample_utils import make_sampler
 
@@ -870,8 +922,9 @@ class Runtime:
         self._pending = []
         self._spec_ok = None
         if self._draft is not None:
-            # mlx-vlm generate_step owns prefill + GDN rollback.
-            # Append-only cache reuse is computed in _iter_draft.
+            # mlx-vlm generate_step owns decode + GDN rollback.
+            # Prefill, PrefixCache, and pyramid tiles run in _iter_draft.
+            self._maybe_warm(getattr(sampling_params, "max_tokens", 0))
             return
         self._maybe_warm(getattr(sampling_params, "max_tokens", 0))
         reuse = reuse_prefill_start(self._fed_ids, ids) if self._cache is not None else 0
@@ -890,45 +943,80 @@ class Runtime:
                     self._cache = make_prompt_cache(self._model)
                     self._fed_ids = []
                     reuse = 0
-        prompt = mx.array(ids, dtype=mx.int32)
         self._sampler = make_sampler(
             temp=sampling_params.temperature,
             top_p=sampling_params.top_p,
             top_k=sampling_params.top_k,
         )
         prefix_n = len(ids) - 1
-        offset = reuse
-        snaps = self._snap_points(offset, prefix_n)   # uses self._prompt_ids
-        stream = _generation_stream()
-        while offset < prefix_n:
-            if self._cancelled:
-                raise Cancelled()
-            step = _pyramid_step(self._prefill_step_size, offset, prefix_n)
-            end = min(offset + step, prefix_n)
-            for sp in snaps:
-                if offset < sp < end:
-                    end = sp          # stop on the boundary so it can be cached
-                    break
-            with mx.stream(stream):
-                self._model(prompt[offset:end][None], cache=self._cache)
-                states = _cache_states(self._cache)
-                if states is not None:
-                    mx.eval(states)
-            self._fed_ids.extend(ids[offset:end])
-            mx.clear_cache()
-            offset = end
-            if self._prefix is not None and offset in snaps:
-                try:
-                    self._prefix.put(ids[:offset], self._cache)
-                except (ValueError, TypeError, RuntimeError):
-                    pass
-        if self._prefix is not None and prefix_n >= PrefixCache.MIN_PREFIX:
-            try:
-                self._prefix.put(ids[:prefix_n], self._cache)
-            except (ValueError, TypeError, RuntimeError):
-                pass
+        if reuse < prefix_n:
+            self._prefill_ids(ids, self._cache, reuse, prefix_n, commit_fed=True)
         self._quantize_kv()
         self._last_token = ids[-1]
+
+    def _prefill_model(self):
+        """Draft caches are sized for language_model; greedy uses the wrapper."""
+        if self._draft is not None:
+            return getattr(self._model, "language_model", self._model)
+        return self._model
+
+    def _prefill_ids(
+        self,
+        ids: list[int],
+        cache,
+        start: int,
+        end: int,
+        *,
+        commit_fed: bool,
+    ) -> None:
+        """Pyramid-tile ids[start:end] into cache. Snapshot PrefixCache at heads.
+
+        generate_step on the MTP path used to own this prefill as one chunk
+        (and older mlx-vlm disabled chunking whenever a drafter was set).
+        Owning the tiles keeps early Metal launches large and lets us copy
+        the system head before decode mutates the arrays.
+        """
+        import mlx.core as mx
+
+        if cache is None or start >= end:
+            return
+        prompt = mx.array(ids, dtype=mx.int32)
+        snaps = self._snap_points(start, end, ids)
+        stream = _generation_stream()
+        fwd = self._prefill_model()
+        offset = start
+        while offset < end:
+            if self._cancelled:
+                raise Cancelled()
+            step = _pyramid_step(self._prefill_step_size, offset, end)
+            chunk_end = min(offset + step, end)
+            for sp in snaps:
+                if offset < sp < chunk_end:
+                    chunk_end = sp
+                    break
+            with mx.stream(stream):
+                chunk = prompt[offset:chunk_end][None]
+                try:
+                    fwd(chunk, cache=cache)
+                except TypeError:
+                    fwd(inputs=chunk, cache=cache)
+                states = _cache_states(cache)
+                if states is not None:
+                    mx.eval(states)
+            if commit_fed:
+                self._fed_ids.extend(ids[offset:chunk_end])
+            mx.clear_cache()
+            offset = chunk_end
+            if self._prefix is not None and offset in snaps:
+                try:
+                    self._prefix.put(ids[:offset], cache)
+                except (ValueError, TypeError, RuntimeError):
+                    pass
+        if self._prefix is not None and end >= PrefixCache.MIN_PREFIX:
+            try:
+                self._prefix.put(ids[:end], cache)
+            except (ValueError, TypeError, RuntimeError):
+                pass
 
     def _quantize_kv(self) -> None:
         """Convert the KV cache to `SLOTBANK_KV_BITS` once it passes the start.
@@ -948,22 +1036,25 @@ class Runtime:
             kv_bits=self._kv_bits,
         )
 
-    def _snap_points(self, start: int, prefix_n: int) -> set:
-        """Block boundaries to stop prefill on so the state can be cached.
+    def _snap_points(self, start: int, prefix_n: int, ids: list[int] | None = None) -> set:
+        """Geometric heads to stop prefill on so the state can be restored.
 
-        The cache cannot be trimmed on hybrid models (30 of 40 layers hold
-        recurrent state), so a reusable prefix must land exactly where prefill
-        stopped. Splitting the first chunk costs one extra chunk; a hit saves
-        the whole block every time.
+        Hybrid GDN cannot trim, so a reusable prefix must land exactly where
+        prefill stopped. Packed OMP turns share ~20% (the sink head, ~2048
+        tokens at the 10k cap), not 128. Keep the largest few boundaries;
+        put() also stores prefix_n when it fits in SLOTBANK_PREFIX_CACHE_MIB.
         """
         if self._prefix is None:
             return set()
-        b = PrefixCache.BLOCK
-        pts = [n for n in range(b, prefix_n, b) if n > start]
-        # Skip boundaries already cached: re-splitting the chunk costs ~50% of
-        # prefill and buys nothing when the snapshot already exists.
-        pts = [n for n in pts if not self._prefix.has(self._prompt_ids[:n])]
-        return set(pts[:2])                  # cap: each snapshot costs ~63 MiB
+        src = ids if ids is not None else self._prompt_ids
+        pts: list[int] = []
+        n = 512
+        while n < prefix_n:
+            if n > start:
+                pts.append(n)
+            n *= 2
+        pts = [p for p in pts if not self._prefix.has(src[:p])]
+        return set(pts[-3:])
 
     def _lookahead(self) -> int:
         import os
@@ -1051,30 +1142,61 @@ class Runtime:
         sp = self._sampling_params
         if sp is None:
             raise ValueError("start_request first")
-        reuse, feed = draft_feed(self._fed_ids, self._prompt_ids, self._dflash_cache is not None)
-        if reuse <= 0:
+        prompt_ids = self._prompt_ids
+        live_n, _live_feed = draft_feed(
+            self._fed_ids, prompt_ids, self._dflash_cache is not None
+        )
+        hit = self._prefix.find(prompt_ids) if self._prefix is not None else None
+        stored = hit[0] if hit is not None else None
+        reuse, _feed = draft_reuse(
+            self._fed_ids,
+            prompt_ids,
+            self._dflash_cache is not None,
+            stored,
+        )
+        if live_n > 0:
+            reuse = live_n
+        elif reuse > 0 and hit is not None and self._prefix is not None:
             self._dflash_cache = vlm_cache.make_prompt_cache(self._model.language_model)
+            try:
+                self._prefix.restore(self._dflash_cache, hit[1])
+                self._prefix.hits += 1
+                self._prefix.saved_tokens += reuse
+            except (ValueError, TypeError, RuntimeError):
+                self._dflash_cache = vlm_cache.make_prompt_cache(
+                    self._model.language_model
+                )
+                reuse = 0
         else:
-            full = mx.array([self._prompt_ids], dtype=mx.int32)
-            _prime_cached_prefix_rope_state(self._model, full, None, {})
-        ids = mx.array([feed], dtype=mx.int32)
-        top_k = sp.top_k if sp.top_k and sp.top_k > 0 else 0
-        # mlx-vlm uses one chunk size for the whole suffix. Size it for the
-        # final length so a long feed cannot blow the attention-score peak.
-        kwargs: dict = {
-            "max_tokens": int(sp.max_tokens),
-            "temperature": float(sp.temperature),
-            "top_p": float(sp.top_p),
-            "top_k": int(top_k),
-            "draft_model": self._draft,
-            "draft_kind": self._draft_kind,
-            "draft_block_size": self._draft_block,
-            "prefill_step_size": _adaptive_step(
-                self._prefill_step_size, max(1, len(feed))
-            ),
-            "prompt_cache": self._dflash_cache,
-        }
+            self._dflash_cache = vlm_cache.make_prompt_cache(self._model.language_model)
+            reuse = 0
+        prefix_n = len(prompt_ids) - 1
         try:
+            if reuse < prefix_n:
+                self._prefill_ids(
+                    prompt_ids,
+                    self._dflash_cache,
+                    reuse,
+                    prefix_n,
+                    commit_fed=False,
+                )
+            if prefix_n > 0:
+                full = mx.array([prompt_ids], dtype=mx.int32)
+                _prime_cached_prefix_rope_state(self._model, full, None, {})
+            ids = mx.array([[prompt_ids[-1]]], dtype=mx.int32)
+            top_k = sp.top_k if sp.top_k and sp.top_k > 0 else 0
+            # Last prompt token only: pyramid tiles already filled the prefix.
+            kwargs: dict = {
+                "max_tokens": int(sp.max_tokens),
+                "temperature": float(sp.temperature),
+                "top_p": float(sp.top_p),
+                "top_k": int(top_k),
+                "draft_model": self._draft,
+                "draft_kind": self._draft_kind,
+                "draft_block_size": self._draft_block,
+                "prefill_step_size": _adaptive_step(self._prefill_step_size, 1),
+                "prompt_cache": self._dflash_cache,
+            }
             for token, _lp in generate_step(ids, self._model, None, None, **kwargs):
                 if self._cancelled:
                     raise Cancelled()

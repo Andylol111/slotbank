@@ -388,6 +388,7 @@ def _enable_serve_envelope(args) -> None:
     os.environ.setdefault("SLOTBANK_CONDENSE", "1")
     os.environ.setdefault("SLOTBANK_PROMPT_PACK", "1")
     os.environ.setdefault("SLOTBANK_PREFIX_CACHE", "1")
+    os.environ.setdefault("SLOTBANK_PREFIX_CACHE_MIB", "1024")
     if not os.environ.get("SLOTBANK_CONTEXT_DIR", "").strip():
         from pathlib import Path
 
