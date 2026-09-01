@@ -716,6 +716,7 @@ class Runtime:
         self._draft_cap = None
         self._dflash_cache = None
         self._pinned = False
+        self._stable_prefix_n: int | None = None
 
     @property
     def tokenizer(self):
@@ -1001,11 +1002,17 @@ class Runtime:
         from mlx_lm.sample_utils import make_sampler
 
         self.pin()
+        stable = getattr(input_ids, "stable_prefix_n", None)
         ids = [int(x) for x in input_ids]
         if not ids:
             raise ValueError("empty prompt")
         self._cancelled = False
         self._prompt_ids = ids
+        try:
+            n = int(stable) if stable else 0
+        except (TypeError, ValueError):
+            n = 0
+        self._stable_prefix_n = n if n >= PrefixCache.MIN_PREFIX else None
         self._sampling_params = sampling_params
         self._generated = []
         self._pending = []
@@ -1141,18 +1148,21 @@ class Runtime:
         256/512/1024 cuts used to slice the first 2k of an 8k envelope into
         three launches; PrefixCache already evicts those crumbs first.
 
-        Keep 128 on short prompts so an OMP follow-up that drops the
-        generation-prompt token still hits the system head. Keep MAX_SNAP
-        (2048) on long prompts so the packed sink is restorable. put()
-        still stores prefix_n when it is <= MAX_SNAP.
+        Keep the Qwen generation-prompt boundary on short prompts
+        (PromptIds.stable_prefix_n). A hardcoded 128 used to split every
+        short hi into two 27B forwards; the follow-up hit is the end of
+        the last user turn, before `<|im_start|>assistant` + think tags.
+        Keep MAX_SNAP (2048) on long prompts so the packed sink is
+        restorable. put() still stores prefix_n when it is <= MAX_SNAP.
         """
         if self._prefix is None:
             return set()
         src = ids if ids is not None else self._prompt_ids
         pts: list[int] = []
         if prefix_n <= PrefixCache.MAX_SNAP:
-            if start < 128 < prefix_n:
-                pts.append(128)
+            sp = self._stable_prefix_n
+            if sp is not None and start < sp < prefix_n:
+                pts.append(int(sp))
         elif start < PrefixCache.MAX_SNAP < prefix_n:
             pts.append(PrefixCache.MAX_SNAP)
         if not src:

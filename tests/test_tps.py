@@ -66,6 +66,10 @@ def test_catalog_sound():
     assert get("distserve-pd").status == REJECTED
     assert get("vllm-gdn-block-apc").status == DEFERRED
     assert get("gdn-cache-contiguous").status == DEFERRED
+    assert get("qwen-chat-prefix-stable").status == ADOPTED
+    assert get("qwen-chat-prefix-stable").needs_trim_cache is False
+    assert get("metal-qmm-prefill").status == DEFERRED
+    assert get("ane-npu-prefill").status == REJECTED
     assert get("warm-prefix-at-load").status != ADOPTED
     assert len(STRATEGIES) >= 10
 
@@ -306,3 +310,13 @@ def test_prefill_ids_pipelines_tiles():
     assert "clear_cache" not in loop
     assert "wait=False" in src
     assert "wait=True" in src
+
+
+def test_start_request_reads_stable_prefix_before_copying_ids():
+    import inspect
+
+    from slotbank.runtime import Runtime
+
+    src = inspect.getsource(Runtime.start_request)
+    assert "stable_prefix_n" in src
+    assert src.index("stable_prefix_n") < src.index("ids = [int(x) for x in input_ids]")

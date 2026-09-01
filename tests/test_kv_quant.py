@@ -118,15 +118,14 @@ def test_snap_points_keep_large_heads(monkeypatch):
     packed_head = rt._snap_points(0, 3000)
     assert packed_head == {2048}
     assert 128 not in packed_head
-    assert 256 not in packed_head
-    assert 512 not in packed_head
-    # Short OMP "hi": full prefix_n includes the generation-prompt token,
-    # which the next turn does not start with. 128 sits inside the system head.
+    # Short OMP "hi": do not split at 128. The follow-up hit is the
+    # generation-prompt boundary from encode_chat, not a geometric crumb.
     short = rt._snap_points(0, 249)
-    assert short == {128}
-    # A short prompt that already fits in one tile still snaps at 128, not 256.
-    mid = rt._snap_points(0, 1800)
-    assert mid == {128}
+    assert short == set()
+    rt._stable_prefix_n = 200
+    assert rt._snap_points(0, 249) == {200}
+    rt._stable_prefix_n = 249
+    assert rt._snap_points(0, 249) == set()
 
 
 def test_shed_keeps_dflash_session(monkeypatch):
