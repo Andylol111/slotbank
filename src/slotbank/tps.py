@@ -176,7 +176,9 @@ STRATEGIES: tuple[Strategy, ...] = (
         "(tool-call leak, needle miss, hit-rate collapse) and still costs "
         "warm TTFT when rollback crosses a block. Metal gated_delta_kernel "
         "does not return per-block states. Our PrefixCache is the analogue: "
-        "stop-and-copy at 128 (short) / 2048 (packed sink). Cannot copy "
+        "stop-and-copy at the pre-/no_think body (short) / 2048 (packed sink). "
+        "mlx-vlm generate_step now has prompt_cache_checkpoint; we still own "
+        "tiles and do not hand N-token prefill back to eval+clear. Cannot copy "
         "SGLang Radix page_size>1 (sgl-project/sglang#12867 still struggles "
         "storing GDN at branches). Do not page hybrid KV.",
     ),
@@ -202,16 +204,35 @@ STRATEGIES: tuple[Strategy, ...] = (
     Strategy(
         "qwen-chat-prefix-stable",
         ADOPTED,
-        "PrefixCache stops at the Qwen generation-prompt boundary, not 128.",
+        "PrefixCache stops at the pre-/no_think body, not 128 and not the generation prompt.",
         "QwenLM/Qwen3#1826 and lmstudio mlx-engine#176: enable_thinking=false "
         "injects empty think tags on add_generation_prompt, but historical "
         "assistant turns omit them, so prefix_n is not a prefix of the next "
         "OMP encode. mlx-engine's template fix got 25× follow-up TTFT "
-        "(4.96 s → 0.20 s). We do not patch jinja; encode_chat records "
-        "stable_prefix_n from a second apply_chat_template without the "
-        "generation prompt. Short prompts snap there (near the tail) instead "
-        "of 128 in the middle. Packed 8k still snaps at 2048. Does not change "
-        "27B tokens.",
+        "(4.96 s → 0.20 s). We do not patch jinja. encode_chat records "
+        "stable_prefix_n from apply_chat_template on the messages *before* "
+        "with_qwen_mode, without the generation prompt. Snapping after "
+        "/no_think (the last-ask switch) missed every OMP follow-up — "
+        "historical turns omit that suffix. Packed 8k still snaps at 2048. "
+        "Does not change 27B tokens.",
+    ),
+    Strategy(
+        "omp-reencode-prefix",
+        ADOPTED,
+        "OMP follow-up PrefixCache: same user-dump condense, no log inject, repair KV offset.",
+        "Three in-tree misses sat past GDN/QMM. (1) condense used ask+cites "
+        "only on last_user; the next encode tail-clipped that dump as history "
+        "so ids[:n] != stored. Same recipe for every user dump now. (2) "
+        "envelope /no_think is last-ask only; snap the pre-switch body "
+        "(qwen-chat-prefix-stable). (3) serve sets CONTEXT_DIR for the dump "
+        "log, then with_context_os compiled that log back as a newest-first "
+        "system prefix — the dump we condensed out, a new key every turn. "
+        "Envelope does not inject unless SLOTBANK_CONTEXT_INJECT=1. "
+        "PrefixCache.restore also writes KVCache.offset from keys.shape[2] "
+        "when the setter leaves 0 (mlx-lm#1162 class). generate_step still "
+        "gets one last prompt token + the filled cache; it does not re-prefill "
+        "N. 819-token cold ~17 s is one 27B tile (async pipeline cannot help "
+        "a single launch). Does not page hybrid KV or change 27B weights.",
     ),
     Strategy(
         "metal-qmm-prefill",

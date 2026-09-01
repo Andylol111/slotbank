@@ -377,7 +377,9 @@ def _enable_serve_envelope(args) -> None:
 
     Condense + slim tools cut the 26k–39k dump to a Metal-safe prompt.
     Pack is the last resort if the template is still over cap. Prefix
-    cache reuses the stable system head so later turns skip that prefill.
+    cache reuses the pre-/no_think history so later turns skip that
+    prefill. CONTEXT_DIR is a dump log; it is not compiled back into
+    the system prefix (that would miss every follow-up).
     """
     if getattr(args, "no_envelope", False) or os.environ.get(
         "SLOTBANK_ENVELOPE", "",
