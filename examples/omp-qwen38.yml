@@ -1,17 +1,16 @@
 # Oh My Pi 18 /model local pane is llama.cpp + lm-studio.
 # Do NOT put `discovery:` on llama.cpp / lm-studio (F5 caches an empty list).
 # After writing: omp models refresh
-# Serve envelopes OMP dumps (condense + slim tools + pack). Empty dir is
-# still the cheapest hi. cwd /tmp with a child git repo dumps that tree
-# (~39k); contextWindow 65536 is the OMP *session* so that dump does not
-# trip compaction. Metal still prefills the 8k envelope, not 64k.
+#
+# Names are short so the welcome pane fits (not "…-agent (slotbank)").
+# reasoning is off: Qwen opens <think> in the prompt, so a think dump was the
+# visible reply. Default is this model's /no_think + instruct sampling
+# (temp 0.7, top_p 0.8, top_k 20) when OMP sends 1.0. Put /think on the last
+# ask to reason (0.6 / 0.95 / 20). Not an OMP harness temperature field.
 #
 # Picker (fast hi, no tools):  llama.cpp/Qwen3.8-27B-4bit
-# Agent (tools + thinking):    llama.cpp/Qwen3.8-27B-4bit-agent
+# Agent (tools, no think UI):  llama.cpp/Qwen3.8-27B-4bit-agent
 # Anthropic alias:             slotbank/Qwen3.8-27B-4bit
-#
-# maxTokens 2048 + thinking defaultLevel low: 8192/high cooked RAM on "hi".
-# 27B 4-bit load is ~30s; wait for serve "ready".
 #
 #   PYTHONPATH=src .venv/bin/python -m slotbank.cli serve \
 #     --model ~/Models/Qwen3.8-27B-4bit \
@@ -24,7 +23,7 @@ providers:
     disableStrictTools: true
     models:
       - id: Qwen3.8-27B-4bit
-        name: Qwen3.8-27B-4bit (slotbank)
+        name: Qwen3.8-27B
         reasoning: false
         input: [text, image]
         tokenizer: qwen3
@@ -32,24 +31,16 @@ providers:
         maxTokens: 2048
         supportsTools: false
         compat:
-          thinkingFormat: qwen-chat-template
-          supportsReasoningParams: true
           streamIdleTimeoutMs: 600000
       - id: Qwen3.8-27B-4bit-agent
-        name: Qwen3.8-27B-4bit-agent (slotbank)
-        reasoning: true
-        thinking:
-          mode: effort
-          efforts: [low, medium, high, xhigh]
-          defaultLevel: low
+        name: "Qwen3.8-27B tools"
+        reasoning: false
         input: [text, image]
         tokenizer: qwen3
         contextWindow: 65536
         maxTokens: 2048
         supportsTools: true
         compat:
-          thinkingFormat: qwen-chat-template
-          supportsReasoningParams: true
           streamIdleTimeoutMs: 600000
   lm-studio:
     baseUrl: http://127.0.0.1:8080/v1
@@ -58,7 +49,7 @@ providers:
     disableStrictTools: true
     models:
       - id: Qwen3.8-27B-4bit
-        name: Qwen3.8-27B-4bit (slotbank)
+        name: Qwen3.8-27B
         reasoning: false
         input: [text, image]
         tokenizer: qwen3
@@ -66,24 +57,16 @@ providers:
         maxTokens: 2048
         supportsTools: false
         compat:
-          thinkingFormat: qwen-chat-template
-          supportsReasoningParams: true
           streamIdleTimeoutMs: 600000
       - id: Qwen3.8-27B-4bit-agent
-        name: Qwen3.8-27B-4bit-agent (slotbank)
-        reasoning: true
-        thinking:
-          mode: effort
-          efforts: [low, medium, high, xhigh]
-          defaultLevel: low
+        name: "Qwen3.8-27B tools"
+        reasoning: false
         input: [text, image]
         tokenizer: qwen3
         contextWindow: 65536
         maxTokens: 2048
         supportsTools: true
         compat:
-          thinkingFormat: qwen-chat-template
-          supportsReasoningParams: true
           streamIdleTimeoutMs: 600000
   slotbank:
     baseUrl: http://127.0.0.1:8080/v1
@@ -95,7 +78,7 @@ providers:
       timeoutMs: 30000
     models:
       - id: Qwen3.8-27B-4bit
-        name: Qwen3.8-27B-4bit (slotbank)
+        name: Qwen3.8-27B
         reasoning: false
         input: [text, image]
         tokenizer: qwen3
@@ -105,12 +88,8 @@ providers:
         compat:
           streamIdleTimeoutMs: 600000
       - id: Qwen3.8-27B-4bit-agent
-        name: Qwen3.8-27B-4bit-agent (slotbank)
-        reasoning: true
-        thinking:
-          mode: effort
-          efforts: [low, medium, high, xhigh]
-          defaultLevel: low
+        name: "Qwen3.8-27B tools"
+        reasoning: false
         input: [text, image]
         tokenizer: qwen3
         contextWindow: 65536

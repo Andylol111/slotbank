@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from slotbank.load import EngineNotReady, is_loading, poll_until_ready
+from slotbank.prompt import hide_think_from_client, qwen_mode_of
 from slotbank.types import SamplingParams
 
 
@@ -156,6 +157,7 @@ def register_messages(app: FastAPI, engine) -> None:
             top_k=-1 if req.top_k is None else int(req.top_k),
             max_tokens=int(req.max_tokens),
             stop_strs=list(req.stop_sequences or []),
+            qwen_mode=qwen_mode_of(req.messages),
         )
         mid = f"msg_{uuid.uuid4().hex}"
         if req.stream:
@@ -177,7 +179,7 @@ def register_messages(app: FastAPI, engine) -> None:
         result = engine.generate(ids, sampling)
         reason, seq = _stop(result.finish_reason, result.matched_stop)
         content: list[dict[str, Any]] = []
-        if result.reasoning:
+        if result.reasoning and not hide_think_from_client():
             content.append({"type": "thinking", "thinking": result.reasoning})
         if result.content:
             content.append({"type": "text", "text": result.content})

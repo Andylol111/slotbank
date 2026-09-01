@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from slotbank.load import EngineNotReady, is_loading, poll_until_ready
 from slotbank.omp import DEFAULT_CONTEXT_WINDOW
-from slotbank.prompt import enforce_prompt_cap
+from slotbank.prompt import enforce_prompt_cap, hide_think_from_client, qwen_mode_of
 from slotbank.types import SamplingParams
 
 
@@ -54,6 +54,7 @@ def _stops(stop: str | list[str] | None) -> list[str]:
 
 def _sampling(req) -> SamplingParams:
     max_tokens = getattr(req, "max_completion_tokens", None) or req.max_tokens or 1024
+    msgs = getattr(req, "messages", None)
     return SamplingParams(
         temperature=0.0 if req.temperature is None else float(req.temperature),
         top_p=1.0 if req.top_p is None else float(req.top_p),
@@ -61,6 +62,7 @@ def _sampling(req) -> SamplingParams:
         max_tokens=int(max_tokens),
         ignore_eos=bool(getattr(req, "ignore_eos", False)),
         stop_strs=_stops(req.stop),
+        qwen_mode=qwen_mode_of(msgs) if msgs else None,
     )
 
 
@@ -177,7 +179,7 @@ def register_chat(app: FastAPI, engine) -> None:
         sampling = _sampling(req)
         result = engine.generate(ids, sampling)
         message: dict[str, Any] = {"role": "assistant", "content": result.content or None}
-        if result.reasoning:
+        if result.reasoning and not hide_think_from_client():
             message["reasoning_content"] = result.reasoning
         if result.tool_calls:
             message["tool_calls"] = _openai_tools(result.tool_calls)

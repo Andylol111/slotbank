@@ -284,7 +284,9 @@ STRATEGIES: tuple[Strategy, ...] = (
         "messages.py already defaults temp to 1 when the client omits it. mlx-vlm "
         "verify is Leviathan-Chen: output distribution is the 27B at that temperature. "
         "Accept rate (hence tok/s) is lower than the greedy 13.47 bench. Do not force "
-        "temp 0 to chase the bench number — the harness uses 1 for thinking.",
+        "temp 0 to chase the bench number. OMP still sends 1.0; the 27B envelope maps "
+        "that onto Qwen's documented pair (instruct 0.7/0.8/20 with /no_think, thinking "
+        "0.6/0.95/20 with /think on the last ask). Not an OMP yaml temperature.",
         extra_drafter=True,
     ),
     Strategy(
@@ -307,9 +309,20 @@ STRATEGIES: tuple[Strategy, ...] = (
         "and 'the most recent turn alone is too large'. Lying in prompt_tokens does "
         "not shrink that bar. Advertise 65536 so the dump fits; serve still prefills "
         "8192. PrefixCache snaps at most 2048 tokens / 384 MiB (a 10k copy was ~790 MiB "
-        "and jetsamed 24 GB). YAML maxTokens 2048 and thinking defaultLevel low stop "
-        "an 8k think loop on 'hi'. SpecialHoldback strips streamed <|im_end|>. "
+        "and jetsamed 24 GB). YAML maxTokens 2048. Qwen /no_think (qwen-no-think-prompt) "
+        "stops the think dump on hi. SpecialHoldback strips streamed <|im_end|>. "
         "Does not page hybrid KV. 30s boot is 27B 4-bit load.",
+    ),
+    Strategy(
+        "qwen-no-think-prompt",
+        ADOPTED,
+        "Qwen /no_think + instruct sampling on the 27B OMP door; stream the answer only.",
+        "thinkingFormat: qwen-chat-template does not see <think> in the stream — the "
+        "template opens it in the prompt — so OMP printed analysis + </think> + answer "
+        "+ <|im_end|>. Envelope appends /no_think (Qwen's own switch), sets "
+        "enable_thinking false, remaps OMP temp 1.0 to 0.7/0.8/20, holds think/EOS in "
+        "the stream, and names the pane Qwen3.8-27B not …-agent (slotbank). Put /think "
+        "on the last ask to reason. Does not change 27B weights or page hybrid KV.",
     ),
     Strategy(
         "qwen35-4b-as-27b-drafter",
