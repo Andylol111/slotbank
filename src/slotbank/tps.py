@@ -41,6 +41,9 @@ M4_AIR_24G = {
     "dflash_k8_code": 9.10,
     "bandwidth_bytes_s": 120 << 30,
     "weight_bytes_4bit": 15 << 30,
+    # Cold 819-token prefill vs live suffix reuse, same Air, 2026-08-31.
+    "prefill_819_s": 17.0,
+    "prefill_819_reuse_s": 0.88,
 }
 
 
@@ -96,6 +99,51 @@ STRATEGIES: tuple[Strategy, ...] = (
         "DFlash lost to MTP on the high-accept count prompt, so a longer second guesser "
         "is not a 2× layer.",
         extra_drafter=True,
+    ),
+    Strategy(
+        "ttft-is-prefill",
+        ADOPTED,
+        "Time-to-first-token is prompt prefill, not MTP. ~48 tok/s prefill on this Air.",
+        "819-token cold 17.0 s (48 tok/s). Same prefix reused 0.88 s (19×). "
+        "The first generated token still needs that prefill plus one 27B forward. "
+        "MTP K=3 raises decode tok/s; it does not shrink TTFT. Shrink N "
+        "(envelope / condense / PrefixCache) or skip work inside each tile.",
+    ),
+    Strategy(
+        "skip-lm-head-prefill",
+        ADOPTED,
+        "Prefill tiles pass skip_logits so Qwen's 248k lm_head is not built.",
+        "mlx-vlm LanguageModel.__call__ already has skip_logits. Gemma 3 on "
+        "mlx-swift saw 2.6× prefill from skipping a 262k head that was actually "
+        "evaluated. Here we only mx.eval cache states; lazy MLX may already drop "
+        "the head. Passing skip_logits is the explicit path and avoids building "
+        "the [T, 248320] graph. Does not change 27B tokens.",
+    ),
+    Strategy(
+        "spec-prefill-sparse",
+        REJECTED,
+        "SpecPrefill / GemFilter: prefill only 'important' prompt tokens.",
+        "The 27B would not see the full packed prompt. Same class as "
+        "pflash-drop-prompt. A 4B importance scorer is also "
+        "qwen35-4b-as-27b-drafter. Papers quote 2–5× TTFT on CUDA MoE.",
+    ),
+    Strategy(
+        "async-prefill-pipeline",
+        DEFERRED,
+        "mx.async_eval tile N while building tile N+1 (Gemma 3 mlx-swift).",
+        "Our tiles mx.eval then mx.clear_cache, fully serial. Gemma's 128-token "
+        "default won over 1024 by overlapping graph build. 27B 4-bit on 24 GB "
+        "chose large pyramid tiles to cap peak and cut launches. Measure on the "
+        "Air before shrinking tiles; clear_cache-every-tile may erase the overlap.",
+    ),
+    Strategy(
+        "warm-prefix-at-load",
+        DEFERRED,
+        "After pin, prefill a synthetic system head into PrefixCache.",
+        "Helps only if that head is an exact prefix of the first OMP encode. "
+        "OMP re-encodes cwd+harness each run; --direct is stable but short. "
+        "The first real turn already fills PrefixCache for follow-ups (19×). "
+        "Warming a dummy that misses is a 17s tax at boot.",
     ),
     Strategy(
         "unquantized-bf16-27b",
@@ -499,6 +547,7 @@ def catalog_sound() -> None:
         "extra-quant-3bit",
         "harness-structure-for-tps",
         "qwen35-4b-as-27b-drafter",
+        "spec-prefill-sparse",
     }
     for sid in banned_adopted:
         if get(sid).status == ADOPTED:
@@ -515,6 +564,21 @@ def catalog_sound() -> None:
         raise ValueError("catalog still claims DFlash beats MTP")
     if M4_AIR_24G["mtp_k3_count"] < 2 * M4_AIR_24G["greedy_toks"] - 0.2:
         raise ValueError("MTP speedup vs greedy drifted below ~2×")
+    if M4_AIR_24G["prefill_819_reuse_s"] >= M4_AIR_24G["prefill_819_s"] / 10:
+        raise ValueError("suffix reuse no longer beats cold prefill by ~10×")
+
+
+def prefill_seconds(n_tokens: int, reuse: int = 0) -> float:
+    """TTFT prefill estimate from the measured 819-token cold rate.
+
+    Does not include pin-on-first-request or the last-token generate_step.
+    """
+    cold = float(M4_AIR_24G["prefill_819_s"])
+    if cold <= 0:
+        return 0.0
+    rate = 819.0 / cold
+    work = max(0, int(n_tokens) - max(0, int(reuse)))
+    return work / rate
 
 
 def log_path() -> Path:
