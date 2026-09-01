@@ -43,8 +43,8 @@ def test_models_list_matches_omp_discovery():
     assert row["owned_by"] == "slotbank"
     assert "anthropic" in row["supported_endpoint_types"]
     assert "openai" in row["supported_endpoint_types"]
-    assert row["max_model_len"] == 32768
-    assert row["meta"]["n_ctx"] == 32768
+    assert row["max_model_len"] == 65536
+    assert row["meta"]["n_ctx"] == 65536
 
 
 def test_llama_cpp_native_discovery_skips_auth(monkeypatch):
@@ -54,15 +54,15 @@ def test_llama_cpp_native_discovery_skips_auth(monkeypatch):
     assert models.status_code == 200
     body = models.json()
     assert body["data"][0]["id"] == "toy"
-    assert body["data"][0]["meta"]["n_ctx"] == 32768
+    assert body["data"][0]["meta"]["n_ctx"] == 65536
     assert body["data"][0]["status"]["value"] == "loaded"
     assert body["data"][0]["architecture"]["input_modalities"] == ["text"]
     assert c.get("/v1/models").json()["data"][0]["id"] == "toy"
     props = c.get("/props")
     assert props.status_code == 200
     p = props.json()
-    assert p["n_ctx"] == 32768
-    assert p["default_generation_settings"]["n_ctx"] == 32768
+    assert p["n_ctx"] == 65536
+    assert p["default_generation_settings"]["n_ctx"] == 65536
     assert p["default_generation_settings"]["params"]["max_tokens"] == -1
     assert p["default_generation_settings"]["params"]["n_predict"] == -1
     assert p["modalities"]["vision"] is False
@@ -82,9 +82,9 @@ def test_health_reports_loading():
     listed = client.get("/models")
     assert listed.status_code == 200
     assert listed.json()["data"][0]["id"] == "Qwen3.8-27B-4bit"
-    assert listed.json()["data"][0]["meta"]["n_ctx"] == 32768
+    assert listed.json()["data"][0]["meta"]["n_ctx"] == 65536
     assert listed.json()["data"][0]["status"]["value"] == "loading"
-    assert client.get("/props").json()["n_ctx"] == 32768
+    assert client.get("/props").json()["n_ctx"] == 65536
     proxy = EngineProxy(LoadingEngine("a"))
     assert proxy.model_id == "a"
     proxy.replace(FakeEngine())

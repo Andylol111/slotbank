@@ -155,14 +155,16 @@ def test_keep_token_ids_is_sink_pyramid_tail():
 
 
 def test_keep_token_ids_head_lands_on_prefix_snap():
-    """Envelope cap 10240 → 20% head 2048, a PrefixCache geometric snap."""
+    """8k envelope → 25% head 2048, a PrefixCache geometric snap."""
     from slotbank.prompt import keep_token_ids
 
     ids = list(range(20000))
-    got = keep_token_ids(ids, 10240)
-    assert len(got) == 10240
+    got = keep_token_ids(ids, 8192)
+    assert len(got) == 8192
     assert got[:2048] == ids[:2048]
     assert got[-1] == 19999
+    fat = keep_token_ids(ids, 10240)
+    assert fat[:2048] == ids[:2048]
 
 
 def test_condense_keeps_ask_and_cites_the_dump():
@@ -180,6 +182,26 @@ def test_condense_keeps_ask_and_cites_the_dump():
     assert "foo.py" in blob
     assert blob.count("LINE") < 40
     assert "tools " * 50 not in blob
+
+
+def test_condense_omits_cwd_child_git_dump():
+    """OMP footer ↳ dumps a nested git tree; 27B should see the ask, not 39k of files."""
+    from slotbank.prompt import condense_harness_messages
+
+    tree = "\n".join(f"src/file_{i}.py" for i in range(800))
+    dump = (
+        "╭── π  │ ⬢ Qwen3.8-27B-4bit-agent\n"
+        + tree
+        + "\n╰─  /tmp ↳ llama.cpp-dflash2 ─╯\n\nhi"
+    )
+    got = condense_harness_messages(
+        [{"role": "user", "content": dump}], budget=400,
+    )
+    blob = str(got[0]["content"])
+    assert "hi" in blob
+    assert "cwd nested git dump omitted" in blob
+    assert "cwd-child:llama.cpp-dflash2" in blob
+    assert blob.count("src/file_") < 5
 
 
 def test_encode_chat_condenses_when_asked(monkeypatch):
@@ -427,6 +449,7 @@ def test_enable_serve_envelope_defaults(tmp_path, monkeypatch):
     for k in (
         "SLOTBANK_ENVELOPE", "SLOTBANK_CONDENSE", "SLOTBANK_PROMPT_PACK",
         "SLOTBANK_PREFIX_CACHE", "SLOTBANK_PREFIX_CACHE_MIB", "SLOTBANK_MAX_PROMPT",
+        "SLOTBANK_MAX_COMPLETION",
     ):
         monkeypatch.delenv(k, raising=False)
     _enable_serve_envelope(SimpleNamespace(no_envelope=False))
@@ -434,7 +457,8 @@ def test_enable_serve_envelope_defaults(tmp_path, monkeypatch):
     assert os.environ["SLOTBANK_CONDENSE"] == "1"
     assert os.environ["SLOTBANK_PROMPT_PACK"] == "1"
     assert os.environ["SLOTBANK_PREFIX_CACHE"] == "1"
-    assert os.environ["SLOTBANK_PREFIX_CACHE_MIB"] == "1024"
+    assert os.environ["SLOTBANK_PREFIX_CACHE_MIB"] == "384"
+    assert os.environ["SLOTBANK_MAX_COMPLETION"] == "2048"
     assert max_prompt_tokens() == DEFAULT_ENVELOPE_MAX_PROMPT
     _enable_serve_envelope(argparse.Namespace(no_envelope=True))
     assert os.environ["SLOTBANK_ENVELOPE"] == "0"

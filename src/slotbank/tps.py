@@ -294,10 +294,22 @@ STRATEGIES: tuple[Strategy, ...] = (
         "OMP still failed on 400/jetsam when the client sent 26k–39k tokens. "
         "slotbank serve now defaults SLOTBANK_ENVELOPE=1. Condense keeps ask + "
         "citations; slim_tools drops JSON schemas (the catalog alone is >16k); "
-        "keep_token_ids packs any leftover to 10240. Prefix cache now runs on "
+        "keep_token_ids packs any leftover to 8192. Prefix cache now runs on "
         "the MTP path (draft-prefix-cache) so later turns skip the system-head "
         "prefill. Does not page hybrid KV and does not change 27B weights. "
         "--no-envelope restores 400.",
+    ),
+    Strategy(
+        "omp-session-vs-metal",
+        ADOPTED,
+        "Wide OMP session (64k) so compaction does not loop; Metal envelope stays 8k.",
+        "OMP compacting on its own bar: a 39k cwd dump at contextWindow 32k is ~80% "
+        "and 'the most recent turn alone is too large'. Lying in prompt_tokens does "
+        "not shrink that bar. Advertise 65536 so the dump fits; serve still prefills "
+        "8192. PrefixCache snaps at most 2048 tokens / 384 MiB (a 10k copy was ~790 MiB "
+        "and jetsamed 24 GB). YAML maxTokens 2048 and thinking defaultLevel low stop "
+        "an 8k think loop on 'hi'. SpecialHoldback strips streamed <|im_end|>. "
+        "Does not page hybrid KV. 30s boot is 27B 4-bit load.",
     ),
     Strategy(
         "qwen35-4b-as-27b-drafter",
@@ -337,7 +349,9 @@ STRATEGIES: tuple[Strategy, ...] = (
         "_iter_draft now restores the longest exact snapshot into a new cache, pyramid-tiles "
         "the gap, and leaves mlx-vlm generate_step the last token + rollback. Live append "
         "still wins when the client is append-only. SLOTBANK_PREFIX_CACHE_MIB defaults to "
-        "1024 so a 10k envelope prefix fits (~640 MiB attn KV + GDN). Does not page hybrid KV.",
+        "384 so a 2048-token head fits (~278 MiB attn KV + GDN), not a 10k envelope copy "
+        "(~790 MiB) that jetsams 24 GB. put() refuses snaps past PrefixCache.MAX_SNAP=2048. "
+        "Does not page hybrid KV.",
     ),
 )
 
