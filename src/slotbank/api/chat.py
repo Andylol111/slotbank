@@ -10,7 +10,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from slotbank.load import EngineNotReady
+from slotbank.load import EngineNotReady, is_loading, poll_until_ready
+from slotbank.omp import DEFAULT_CONTEXT_WINDOW
 from slotbank.prompt import enforce_prompt_cap
 from slotbank.types import SamplingParams
 
@@ -110,7 +111,7 @@ _SSE_HEADERS = {
 
 def models_payload(engine) -> dict[str, Any]:
     """OpenAI ``GET /v1/models`` plus llama.cpp native fields OMP 18 parses."""
-    ctx = int(getattr(engine, "context_window", 16384) or 16384)
+    ctx = int(getattr(engine, "context_window", 0) or DEFAULT_CONTEXT_WINDOW)
     modalities = ["text", "image"] if _vision_on() else ["text"]
     return {
         "object": "list",
@@ -130,7 +131,7 @@ def models_payload(engine) -> dict[str, Any]:
 
 def llama_props_payload(engine) -> dict[str, Any]:
     """llama.cpp ``GET /props`` so OMP's 150 ms probe is not a miss."""
-    ctx = int(getattr(engine, "context_window", 16384) or 16384)
+    ctx = int(getattr(engine, "context_window", 0) or DEFAULT_CONTEXT_WINDOW)
     return {
         "n_ctx": ctx,
         "modalities": {"vision": _vision_on()},
@@ -148,6 +149,12 @@ def register_chat(app: FastAPI, engine) -> None:
 
     @app.post("/v1/chat/completions")
     def chat(req: ChatRequest):
+        if req.stream:
+            return StreamingResponse(
+                _stream_chat_when_ready(engine, req),
+                media_type="text/event-stream",
+                headers=_SSE_HEADERS,
+            )
         try:
             # A base model with no chat template is a client error, not a 500.
             # /v1/messages and /v1/responses already guard this.
@@ -157,12 +164,6 @@ def register_chat(app: FastAPI, engine) -> None:
         except ValueError as exc:
             return _prompt_too_long(exc)
         sampling = _sampling(req)
-        if req.stream:
-            return StreamingResponse(
-                _stream_chat(engine, ids, sampling, req.model),
-                media_type="text/event-stream",
-                headers=_SSE_HEADERS,
-            )
         result = engine.generate(ids, sampling)
         message: dict[str, Any] = {"role": "assistant", "content": result.content or None}
         if result.reasoning:
@@ -189,22 +190,19 @@ def register_chat(app: FastAPI, engine) -> None:
 
     @app.post("/v1/completions")
     def completions(req: CompletionRequest):
+        if req.stream:
+            return StreamingResponse(
+                _stream_completion_when_ready(engine, req),
+                media_type="text/event-stream",
+                headers=_SSE_HEADERS,
+            )
         try:
-            if isinstance(req.prompt, list):
-                ids = enforce_prompt_cap([int(x) for x in req.prompt])
-            else:
-                ids = engine.tokenize_text(req.prompt)
+            ids = _prompt_ids(engine, req)
         except EngineNotReady as exc:
             return _not_ready(exc)
         except ValueError as exc:
             return _prompt_too_long(exc)
         sampling = _sampling(req)
-        if req.stream:
-            return StreamingResponse(
-                _stream_completion(engine, ids, sampling, req.model),
-                media_type="text/event-stream",
-                headers=_SSE_HEADERS,
-            )
         result = engine.generate(ids, sampling)
         return {
             "id": f"cmpl-{uuid.uuid4().hex[:12]}",
@@ -228,6 +226,46 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
+def _prompt_ids(engine, req: ChatRequest | CompletionRequest) -> list[int]:
+    if isinstance(req, CompletionRequest):
+        if isinstance(req.prompt, list):
+            return enforce_prompt_cap([int(x) for x in req.prompt])
+        return engine.tokenize_text(req.prompt)
+    return engine.tokenize_chat(req.messages, _tools(req))
+
+
+def _stream_chat_when_ready(engine, req: ChatRequest):
+    """Ping while weights load. OMP llama.cpp streams this path, not Anthropic."""
+    from slotbank.api.messages import LOAD_WAIT_S, STREAM_PING_S
+
+    sampling = _sampling(req)
+    uid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+    yield _sse({
+        "id": uid,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": req.model,
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+    })
+    try:
+        if is_loading(engine):
+            for _ in poll_until_ready(
+                engine, timeout=LOAD_WAIT_S, ping_s=STREAM_PING_S,
+            ):
+                yield ": ping\n\n"
+        ids = _prompt_ids(engine, req)
+    except EngineNotReady as exc:
+        yield _sse({"error": {"message": str(exc), "type": "overloaded_error"}})
+        yield "data: [DONE]\n\n"
+        return
+    except ValueError as exc:
+        yield _sse({"error": {"message": str(exc), "type": "invalid_request_error"}})
+        yield "data: [DONE]\n\n"
+        return
+    yield from _stream_chat_body(engine, ids, sampling, req.model, uid, created)
+
+
 def _stream_chat(engine, ids, sampling, model: str):
     uid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
@@ -238,8 +276,17 @@ def _stream_chat(engine, ids, sampling, model: str):
         "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
     })
+    yield from _stream_chat_body(engine, ids, sampling, model, uid, created)
+
+
+def _stream_chat_body(engine, ids, sampling, model: str, uid: str, created: int):
+    from slotbank.api.messages import _with_pings
+
     result = None
-    for kind, payload in engine.stream(ids, sampling):
+    for kind, payload in _with_pings(engine.stream(ids, sampling)):
+        if kind == "ping":
+            yield ": ping\n\n"
+            continue
         if kind == "delta" and payload:
             yield _sse({
                 "id": uid,
@@ -266,6 +313,28 @@ def _stream_chat(engine, ids, sampling, model: str):
         "choices": [{"index": 0, "delta": extra, "finish_reason": finish}],
     })
     yield "data: [DONE]\n\n"
+
+
+def _stream_completion_when_ready(engine, req: CompletionRequest):
+    from slotbank.api.messages import LOAD_WAIT_S, STREAM_PING_S
+
+    sampling = _sampling(req)
+    try:
+        if is_loading(engine):
+            for _ in poll_until_ready(
+                engine, timeout=LOAD_WAIT_S, ping_s=STREAM_PING_S,
+            ):
+                yield ": ping\n\n"
+        ids = _prompt_ids(engine, req)
+    except EngineNotReady as exc:
+        yield _sse({"error": {"message": str(exc), "type": "overloaded_error"}})
+        yield "data: [DONE]\n\n"
+        return
+    except ValueError as exc:
+        yield _sse({"error": {"message": str(exc), "type": "invalid_request_error"}})
+        yield "data: [DONE]\n\n"
+        return
+    yield from _stream_completion(engine, ids, sampling, req.model)
 
 
 def _stream_completion(engine, ids, sampling, model: str):
