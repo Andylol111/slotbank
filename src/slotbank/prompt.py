@@ -535,6 +535,34 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
     return ids
 
 
+class PromptIds(list):
+    """Chat token ids plus the Qwen generation-prompt boundary.
+
+    Historical assistant turns omit the generation-prompt think tags
+    (QwenLM/Qwen3#1826, lmstudio mlx-engine#176). PrefixCache can only
+    restore an exact GDN stop, so that boundary is the follow-up hit —
+    not prefix_n (which still includes the generation-prompt suffix) and
+    not a hardcoded 128.
+    """
+
+    stable_prefix_n: int = 0
+
+
+def _prompt_ids(ids: list[int], stable: int = 0) -> PromptIds:
+    out = PromptIds(ids)
+    out.stable_prefix_n = max(0, min(int(stable), len(out)))
+    return out
+
+
+def _common_prefix_n(a: list[int], b: list[int]) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | None) -> list[int]:
     msgs = normalize_messages(with_context_os(with_direct(messages)))
     if _condense_on():
@@ -550,7 +578,7 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
         return list(tokenizer.encode(text))
 
     if apply is None:
-        return enforce_prompt_cap(plain())
+        return _prompt_ids(enforce_prompt_cap(plain()))
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
@@ -558,21 +586,41 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     }
     if tools:
         kwargs["tools"] = tools
+
+    def _apply(k: dict[str, Any]):
+        return apply(msgs, **k)
+
     try:
-        ids = apply(msgs, **kwargs)
+        raw = _apply(kwargs)
     except TypeError:
         kwargs.pop("tools", None)
         try:
-            ids = apply(msgs, **kwargs)
+            raw = _apply(kwargs)
         except TypeError:
             kwargs.pop("enable_thinking", None)
-            ids = apply(msgs, **kwargs)
+            raw = _apply(kwargs)
     except ValueError:
         # A base model ships the method but no template, and transformers
         # raises rather than returning None. Without this, every base
         # checkpoint 500s on /v1/chat/completions instead of falling back.
-        return enforce_prompt_cap(plain())
-    return enforce_prompt_cap(_token_ids(ids))
+        return _prompt_ids(enforce_prompt_cap(plain()))
+    full = _token_ids(raw)
+    body: list[int] | None = None
+    try:
+        body_kw = dict(kwargs)
+        body_kw["add_generation_prompt"] = False
+        body = _token_ids(_apply(body_kw))
+    except (TypeError, ValueError):
+        body = None
+    capped = enforce_prompt_cap(full)
+    stable = 0
+    if body:
+        n = _common_prefix_n(body, full)
+        # Packing rewrites the middle; only keep a stop that is still a
+        # prefix of what we actually prefill.
+        if n >= 32 and capped[:n] == full[:n]:
+            stable = n
+    return _prompt_ids(capped, stable)
 
 
 def _token_ids(ids) -> list[int]:

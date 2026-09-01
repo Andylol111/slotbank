@@ -56,6 +56,30 @@ def test_encode_chat_thinking_defaults_off(monkeypatch):
     assert seen.get("enable_thinking") is False
 
 
+def test_encode_chat_marks_generation_prompt_boundary(monkeypatch):
+    """Qwen add_generation_prompt is not a prefix of the next turn (Qwen3#1826)."""
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            body = list(range(40))
+            if k.get("add_generation_prompt"):
+                return body + [100, 101, 102]
+            return body
+
+        def encode(self, text):
+            return [0]
+
+    ids = encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    assert list(ids) == list(range(40)) + [100, 101, 102]
+    assert getattr(ids, "stable_prefix_n", 0) == 40
+
+
 def test_encode_chat_envelope_injects_no_think(monkeypatch):
     from slotbank.prompt import encode_chat
 

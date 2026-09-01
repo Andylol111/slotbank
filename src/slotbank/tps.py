@@ -158,12 +158,13 @@ STRATEGIES: tuple[Strategy, ...] = (
         "triangular solve + inter-chunk scan) took Qwen3.5-4B bf16 2048 tok "
         "from 2090→247 ms on RTX PRO 6000. PR text: macOS/Metal unchanged — "
         "Metal already runs gated_delta_kernel with the T-loop inside the "
-        "shader when Dk%32==0. After the CUDA fix mlx was still 2.4–4.2× "
-        "behind vLLM/SGLang on FlashAttention/fused GDN, not algorithm. "
-        "README already forbids the T>1 chunked scan for MTP verify (~4% "
-        "argmax flips vs T=1). Prefill of the prompt should use the model's "
-        "stock T>1 Metal kernel, not a second GDN we maintain. Not a 27B "
-        "TTFT lever we can ship in this repo.",
+        "shader when Dk%32==0. Qwen3.8-27B is Dk=Dv=128, 16 QK / 48 V heads, "
+        "so the packed Metal kernel is eligible. mlx-node #68 then measured "
+        "chunked GDN as 2.5–3.5× *slower* than per-step on M5 (24–31× per "
+        "isolated GDN call) and ~2× slower on M3; per-step is the M1–M4 "
+        "reference. CUDA 8.5× was ops-loop → chunked, not 'chunked beats "
+        "fused scan'. README already forbids the T>1 chunked scan for MTP "
+        "verify (~4% argmax flips vs T=1). Not a 27B TTFT lever here.",
     ),
     Strategy(
         "vllm-gdn-block-apc",
@@ -197,6 +198,40 @@ STRATEGIES: tuple[Strategy, ...] = (
         "8k on 24 GB (~4.4 GiB if the leak is live). Do not reimplement "
         "GatedDeltaNet here; confirm the Air's mlx-vlm includes the conv "
         "contiguous and whether long OMP prefills still grow RSS.",
+    ),
+    Strategy(
+        "qwen-chat-prefix-stable",
+        ADOPTED,
+        "PrefixCache stops at the Qwen generation-prompt boundary, not 128.",
+        "QwenLM/Qwen3#1826 and lmstudio mlx-engine#176: enable_thinking=false "
+        "injects empty think tags on add_generation_prompt, but historical "
+        "assistant turns omit them, so prefix_n is not a prefix of the next "
+        "OMP encode. mlx-engine's template fix got 25× follow-up TTFT "
+        "(4.96 s → 0.20 s). We do not patch jinja; encode_chat records "
+        "stable_prefix_n from a second apply_chat_template without the "
+        "generation prompt. Short prompts snap there (near the tail) instead "
+        "of 128 in the middle. Packed 8k still snaps at 2048. Does not change "
+        "27B tokens.",
+    ),
+    Strategy(
+        "metal-qmm-prefill",
+        DEFERRED,
+        "4-bit QMM of the 15 GiB pack is most of remaining prefill time.",
+        "atomgradient mlx-inference-bench on Qwen3.5-9B: quantized matmul "
+        "57.6% of prefill, GDN recurrence 29%, attention 6.7%. Hybrid prefill "
+        "only 5–9% slower than dense Qwen3. After async tiles, the Air's "
+        "floor is mlx's affine-4 QMM, not another GDN algorithm. mlx-node "
+        "sym8 W8A8 was +67% TTFT at 1024 but is a new checkpoint mlx-lm "
+        "cannot load (extra-quant-3bit class). Do not requantize 27B.",
+        changes_target_weights=True,
+    ),
+    Strategy(
+        "ane-npu-prefill",
+        REJECTED,
+        "Core ML / ANE prefill, Metal decode (Yetter / SqueezeBits).",
+        "ANE can beat MLX on TTFT for small models. 27B 4-bit is ~15 GiB; a "
+        "second Core ML copy does not fit leave-free 6g on 24 GB. One Metal "
+        "worker already owns the weights.",
     ),
     Strategy(
         "warm-prefix-at-load",
@@ -504,11 +539,12 @@ STRATEGIES: tuple[Strategy, ...] = (
         "turn re-encoded the chat (not an append of _fed_ids) and paid a cold 10k prefill. "
         "_iter_draft now restores the longest exact snapshot into a new cache, pyramid-tiles "
         "the gap, and leaves mlx-vlm generate_step the last token + rollback. Live append "
-        "still wins when the client is append-only. Snap stops are 128 on short prompts "
-        "(generation-prompt token is not a prefix of the next OMP encode) and 2048 on "
-        "long ones (packed sink). 256/512/1024 crumbs used to split the first 2k of an "
-        "8k envelope into extra 27B forwards on the TTFT path; eviction already dropped "
-        "them first. SLOTBANK_PREFIX_CACHE_MIB defaults to 384 so a 2048-token head fits "
+        "still wins when the client is append-only. Snap stops are the Qwen "
+        "generation-prompt boundary on short prompts (qwen-chat-prefix-stable) "
+        "and 2048 on long ones (packed sink). A hardcoded 128 used to split "
+        "every short hi into two 27B forwards. 256/512/1024 crumbs used to split "
+        "the first 2k of an 8k envelope; eviction already dropped them first. "
+        "SLOTBANK_PREFIX_CACHE_MIB defaults to 384 so a 2048-token head fits "
         "(~278 MiB attn KV + GDN), not a 10k envelope copy (~790 MiB) that jetsams 24 GB. "
         "put() refuses snaps past PrefixCache.MAX_SNAP=2048. Does not page hybrid KV.",
     ),
@@ -596,8 +632,8 @@ def catalog_sound() -> None:
         raise ValueError("daily MTP must stay adopted until a cooler A/B beats it")
     if get("async-prefill-pipeline").status != ADOPTED:
         raise ValueError("prefill pipeline must stay adopted; per-tile eval+clear is the TTFT stall")
-    if get("gdn-chunked-cuda-prefill").status == ADOPTED:
-        raise ValueError("CUDA chunked GDN is not a Metal 27B lever")
+    if get("qwen-chat-prefix-stable").status != ADOPTED:
+        raise ValueError("Qwen generation-prompt boundary must stay the short-prompt snap")
     if daily_draft() != "sidecar-mtp-k3":
         raise ValueError("daily_draft mismatch")
     banned_adopted = {
@@ -619,6 +655,7 @@ def catalog_sound() -> None:
         "spec-prefill-sparse",
         "gdn-chunked-cuda-prefill",
         "distserve-pd",
+        "ane-npu-prefill",
     }
     for sid in banned_adopted:
         if get(sid).status == ADOPTED:
