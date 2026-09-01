@@ -21,9 +21,11 @@ from typing import Iterable
 PROVIDER_ID = "slotbank"
 LLAMA_PROVIDER = "llama.cpp"
 LM_STUDIO_PROVIDER = "lm-studio"
-# OMP's agent scaffolding (tools + system) is already >16k. 32k is the
-# documented stretch window on this Air; 16k makes /model usable and "hi" not.
-DEFAULT_CONTEXT_WINDOW = 32768
+# Advertise a wide OMP *session* so a cwd-child git dump (~39k) does not
+# trip compaction ("turn too large" / compaction loop). Metal still prefills
+# the serve envelope, not this number.
+DEFAULT_CONTEXT_WINDOW = 65536
+DEFAULT_MAX_TOKENS = 2048
 BEGIN = "# --- slotbank omp (managed) ---"
 END = "# --- end slotbank omp ---"
 LEGACY_IDS = frozenset({
@@ -77,7 +79,7 @@ def render_provider(
     thinking: bool = False,
     vision: bool = False,
     context_window: int = DEFAULT_CONTEXT_WINDOW,
-    max_tokens: int = 8192,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     provider_id: str = PROVIDER_ID,
     api: str = "anthropic-messages",
     discovery: str | None = "openai-models-list",
@@ -147,7 +149,7 @@ def _model_entry(
             "        thinking:",
             "          mode: effort",
             "          efforts: [low, medium, high, xhigh]",
-            "          defaultLevel: high",
+            "          defaultLevel: low",
         ])
     lines.extend([
         f"        input: {inputs}",
@@ -252,7 +254,7 @@ def compose_models_yml(
     vision: bool = False,
     existing: str = "",
     context_window: int = DEFAULT_CONTEXT_WINDOW,
-    max_tokens: int = 8192,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> str:
     others = kept_providers(existing)
     body = render_managed_providers(
@@ -271,7 +273,11 @@ def compose_models_yml(
         "# Then: omp models refresh    (F5 in /model keeps a cached empty list)",
         "# Serve envelopes OMP dumps (condense + slim tools + pack leftovers).",
         "# Cloud subscription still keeps the full harness if you have one.",
-        "# A slotbank cwd dump is ~26k tokens; envelope fits it on 24 GB.",
+        "# A cwd-child git dump (~39k) must not trip OMP compaction; contextWindow",
+        "# is the OMP session (64k), not Metal (8k envelope). Prefer the no-tools",
+        "# picker for hi. -agent is tools+thinking. Empty dir, not /tmp with a",
+        "# child git (footer dumps that tree). maxTokens 2048, thinking low.",
+        "# Serve envelopes what 27B prefills.",
         "providers:",
     ]
     for _, block in others:
@@ -291,7 +297,7 @@ def upsert(
     vision: bool = False,
     path: Path | None = None,
     context_window: int = DEFAULT_CONTEXT_WINDOW,
-    max_tokens: int = 8192,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Path:
     dest = path or models_yml_path()
     existing = ""

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, Iterator
 
-from slotbank.decode import finish_text
+from slotbank.decode import completion_cap, finish_text, merge_stops, SpecialHoldback
 from slotbank.layout import parse_byte_size
 from slotbank.prompt import encode_chat, encode_text
 from slotbank.types import GenResult, SamplingParams
@@ -35,9 +35,10 @@ class Engine:
         # An HF snapshot directory is named after the commit hash, so without
         # an explicit name every client would list "23511b94..." as the model.
         from slotbank.admit import public_model_id
+        from slotbank.omp import DEFAULT_CONTEXT_WINDOW
 
         self.model_id = model_id or public_model_id(model_path)
-        self.context_window = 32768
+        self.context_window = DEFAULT_CONTEXT_WINDOW
         self._jobs: queue.Queue[Job | None] = queue.Queue()
         # Load on the worker thread, not here. MLX arrays are bound to the
         # thread that created them, so loading on the main thread and
@@ -74,6 +75,14 @@ class Engine:
         sampling: SamplingParams,
         on_token: Callable[[int, str], None] | None = None,
     ) -> GenResult:
+        sampling = SamplingParams(
+            temperature=sampling.temperature,
+            top_k=sampling.top_k,
+            top_p=sampling.top_p,
+            ignore_eos=sampling.ignore_eos,
+            max_tokens=completion_cap(sampling.max_tokens),
+            stop_strs=merge_stops(sampling.stop_strs),
+        )
         job = Job(input_ids=input_ids, sampling=sampling, out=queue.Queue())
         self._jobs.put(job)
         pieces: list[str] = []
@@ -163,12 +172,17 @@ class Engine:
         generated: list[int] = []
         finish = "stop"
         matched = None
+        scrub = SpecialHoldback()
         for step in self.runtime.iter_steps():
             generated.append(int(step.token_id))
             text = tok.decode(generated)
             piece = text[len(prev):]
             prev = text
-            job.out.put(("tok", int(step.token_id), piece))
+            emit = scrub.push(piece)
+            if step.finished:
+                emit += scrub.flush()
+            if emit:
+                job.out.put(("tok", int(step.token_id), emit))
             if step.finished:
                 finish = step.finish_reason or "stop"
                 matched = step.matched_stop

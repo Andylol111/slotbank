@@ -236,6 +236,22 @@ def condense_harness_messages(
             out.append(m)
             continue
         if i == last_user:
+            if _FOOTER_CHILD.search(text) and _approx_tok(text) > 256:
+                _, ask = _last_ask(text, ask_n)
+                child_cites: list[str] = []
+                seen: set[str] = set()
+                for hit in _FOOTER_CHILD.finditer(text):
+                    key = f"cwd-child:{hit.group(1)}"
+                    if key not in seen:
+                        seen.add(key)
+                        child_cites.append(f"[{key}]")
+                parts = ["[cwd nested git dump omitted]"]
+                if child_cites:
+                    parts.append("Citations:\n" + "\n".join(child_cites[:8]))
+                parts.append((ask or "hi").lstrip())
+                m["content"] = "\n\n".join(p for p in parts if p.strip())
+                out.append(m)
+                continue
             head, ask = _last_ask(text, ask_n)
             cites = _cites(head) or _cites(text)
             dump_head = _clip_tok(head, min(24, cite_n // 4))
@@ -273,10 +289,9 @@ def _maybe_log_raw_user(messages: list[dict[str, Any]]) -> None:
 # Envelope condenses first; this cap is the Metal pack target after that.
 # 0 disables.
 DEFAULT_MAX_PROMPT_TOKENS = 8192
-# Serve envelope: 10k tokens × 64 KiB attn KV ≈ 640 MiB. 12k+ was the
-# jetsam band when the *uncondensed* dump was prefills. After condense
-# the 27B rarely sees more than ~4k; this is headroom for a real file.
-DEFAULT_ENVELOPE_MAX_PROMPT = 10240
+# Serve envelope: 8k tokens × 64 KiB attn KV ≈ 512 MiB. 10k was a 640 MiB
+# KV plus a 790 MiB prefix copy; that is what skyrocketed RAM on 24 GB.
+DEFAULT_ENVELOPE_MAX_PROMPT = 8192
 TOOL_SLIM_BUDGET = 256
 
 
@@ -334,12 +349,12 @@ def keep_token_ids(ids: list[int], cap: int) -> list[int]:
     not to Gated DeltaNet state.
 
     Head length is snapped to 512, 1024, 2048, ... so PrefixCache on the
-    MTP path can restore it instead of missing a 1638-token clip.
+    MTP path can restore it. 25% of the 8k envelope is 2048, a snap.
     """
     n = len(ids)
     if n <= cap or cap <= 0:
         return list(ids)
-    raw_head = max(1, cap * 2 // 10)
+    raw_head = max(1, cap * 1 // 4)
     head_n = _snap_len(raw_head)
     tail_n = max(1, cap * 5 // 10)
     if head_n + tail_n > cap:

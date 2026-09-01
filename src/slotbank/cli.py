@@ -388,7 +388,8 @@ def _enable_serve_envelope(args) -> None:
     os.environ.setdefault("SLOTBANK_CONDENSE", "1")
     os.environ.setdefault("SLOTBANK_PROMPT_PACK", "1")
     os.environ.setdefault("SLOTBANK_PREFIX_CACHE", "1")
-    os.environ.setdefault("SLOTBANK_PREFIX_CACHE_MIB", "1024")
+    os.environ.setdefault("SLOTBANK_PREFIX_CACHE_MIB", "384")
+    os.environ.setdefault("SLOTBANK_MAX_COMPLETION", "2048")
     if not os.environ.get("SLOTBANK_CONTEXT_DIR", "").strip():
         from pathlib import Path
 
@@ -518,8 +519,10 @@ def _omp(args) -> int:
     print(f"also:   {lm_studio_selector(mid)}")
     print("then:   omp models refresh")
     print("        serve envelopes OMP dumps (condense + slim tools + pack)")
+    print("        OMP session 64k (compaction); Metal envelope 8k")
+    print("        empty dir for hi — /tmp with a child git dumps that tree")
     print("        cloud subscription still keeps the full harness if you have one")
-    print("        wait for serve 'ready' before sending")
+    print("        wait for serve 'ready' before sending (~30s 27B load is normal)")
     return 0
 
 
@@ -568,7 +571,8 @@ def _serve(args) -> int:
     if os.environ.get("SLOTBANK_ENVELOPE", "").strip() == "1":
         extra += (
             "\n  envelope                   on "
-            "(condense OMP dump, slim tools, pack leftovers, prefix cache)"
+            "(condense OMP dump, slim tools, pack leftovers, prefix cache; "
+            "Metal 8k / OMP session 64k)"
         )
     elif os.environ.get("SLOTBANK_CONDENSE", "").strip().lower() in {
         "1", "true", "yes", "on",
@@ -585,8 +589,8 @@ def _serve(args) -> int:
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
-            f"  first hi                   wait for 'ready' — serve envelopes "
-            f"the harness dump"
+            f"  first hi                   wait for 'ready' (~30s 27B load). "
+            f"Use {selector(mid)} not -agent. Empty dir, not /tmp with a child git."
         )
     proxy = EngineProxy(LoadingEngine(mid))
     app = create_app(proxy, api_key=args.api_key)

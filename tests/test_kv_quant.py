@@ -100,11 +100,20 @@ def test_prefix_cache_evicts_shortest_first():
     assert kept == [80, 120]
 
 
+def test_prefix_cache_put_skips_oversize_without_mlx():
+    from slotbank.runtime import PrefixCache
+
+    pc = PrefixCache(max_entries=2, max_bytes=1 << 20)
+    assert PrefixCache.MAX_SNAP == 2048
+    assert pc.put(list(range(3000)), object()) == 0
+    assert pc._entries == []
+
+
 def test_snap_points_keep_large_heads(monkeypatch):
     rt = _rt(monkeypatch, SLOTBANK_PREFIX_CACHE="1")
     rt._prompt_ids = list(range(8000))
     pts = rt._snap_points(0, 7999)
-    assert pts == {1024, 2048, 4096}
+    assert pts == {512, 1024, 2048}
     packed_head = rt._snap_points(0, 3000)
     assert 2048 in packed_head
     assert 128 not in packed_head
@@ -383,11 +392,11 @@ def test_prefix_budget_bytes(monkeypatch):
     from slotbank.runtime import _prefix_budget_bytes
 
     monkeypatch.delenv("SLOTBANK_PREFIX_CACHE_MIB", raising=False)
-    assert _prefix_budget_bytes() == 1024 << 20
+    assert _prefix_budget_bytes() == 384 << 20
     monkeypatch.setenv("SLOTBANK_PREFIX_CACHE_MIB", "512")
     assert _prefix_budget_bytes() == 512 << 20
     monkeypatch.setenv("SLOTBANK_PREFIX_CACHE_MIB", "junk")
-    assert _prefix_budget_bytes() == 1024 << 20
+    assert _prefix_budget_bytes() == 384 << 20
 
 
 def test_quantize_kv_is_a_noop_without_a_cache(monkeypatch):

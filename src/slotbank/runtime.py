@@ -480,8 +480,8 @@ def _prefix_budget_bytes() -> int:
     """SLOTBANK_PREFIX_CACHE_MIB: RAM for copied prefix snapshots.
 
     16 full-attn layers are ~64 KiB/token; GDN ArraysCache is ~150 MiB O(1).
-    A 10k envelope prefix is ~790 MiB. Default 1024 MiB so that snapshot
-    fits; 512 MiB used to reject the full head and only keep 128/256.
+    A 2048-token head is ~278 MiB (attn KV + GDN). Default 384 MiB so we
+    keep that head, not a 10k envelope copy (~790 MiB) that jetsams 24 GB.
     """
     import os
 
@@ -491,7 +491,7 @@ def _prefix_budget_bytes() -> int:
             return max(64, int(raw)) << 20
         except ValueError:
             pass
-    return 1024 << 20
+    return 384 << 20
 
 
 class PrefixCache:
@@ -503,8 +503,10 @@ class PrefixCache:
     """
 
     MIN_PREFIX = 32
+    # Don't snapshot the full 10k envelope — that copy is ~790 MiB extra RAM.
+    MAX_SNAP = 2048
 
-    def __init__(self, max_entries: int = 4, max_bytes: int | None = None):
+    def __init__(self, max_entries: int = 2, max_bytes: int | None = None):
         self.max_entries = max_entries
         self.max_bytes = _prefix_budget_bytes() if max_bytes is None else max_bytes
         self._entries: list = []          # [(ids, states, nbytes)]
@@ -525,10 +527,11 @@ class PrefixCache:
         return best
 
     def put(self, ids: list[int], cache) -> int:
-        import mlx.core as mx
-
         if cache is None or len(ids) < self.MIN_PREFIX:
             return 0
+        if len(ids) > self.MAX_SNAP:
+            return 0
+        import mlx.core as mx
         for e_ids, _s, _n in self._entries:
             if e_ids == ids:
                 return 0
@@ -692,7 +695,19 @@ class Runtime:
         self._tokenizer = tokenizer
         eos = getattr(tokenizer, "eos_token_id", None)
         if eos is not None:
-            self._eos_token_ids.add(int(eos))
+            try:
+                self._eos_token_ids.add(int(eos))
+            except (TypeError, ValueError):
+                pass
+        extra = getattr(tokenizer, "eos_token_ids", None) or ()
+        try:
+            for t in extra:
+                self._eos_token_ids.add(int(t))
+        except TypeError:
+            try:
+                self._eos_token_ids.add(int(extra))
+            except (TypeError, ValueError):
+                pass
         self._logprobs = _compile_logprobs()
         self._load_draft()
         if progress is not None:
@@ -1040,18 +1055,19 @@ class Runtime:
         """Geometric heads to stop prefill on so the state can be restored.
 
         Hybrid GDN cannot trim, so a reusable prefix must land exactly where
-        prefill stopped. Packed OMP turns share ~20% (the sink head, ~2048
-        tokens at the 10k cap). Short follow-ups share only the system head;
-        128/256 sit inside that when the full prefix_n includes a generation
-        prompt token the next turn does not start with. Keep the largest few
-        boundaries; put() also stores prefix_n when it fits.
+        prefill stopped. Packed OMP turns share the 25% sink head (~2048
+        tokens at the 8k envelope). Short follow-ups share only the system
+        head; 128/256 sit inside that when the full prefix_n includes a
+        generation-prompt token the next turn does not start with. Keep the
+        largest few boundaries; put() stores prefix_n only when it is
+        <= MAX_SNAP (2048) so 8k copies do not jetsam 24 GB.
         """
         if self._prefix is None:
             return set()
         src = ids if ids is not None else self._prompt_ids
         pts: list[int] = []
         n = 128
-        while n < prefix_n:
+        while n < prefix_n and n <= PrefixCache.MAX_SNAP:
             if n > start:
                 pts.append(n)
             n *= 2

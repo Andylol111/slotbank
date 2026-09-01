@@ -135,9 +135,12 @@ providers:
     assert "discovery:" not in _block(text, "llama.cpp")
     assert "discovery:" not in _block(text, "lm-studio")
     assert "type: openai-models-list" in _block(text, "slotbank")
-    assert "contextWindow: 32768" in text
+    assert "contextWindow: 65536" in text
+    assert "maxTokens: 2048" in text
+    assert "defaultLevel: low" in text
     assert "Qwen3.8-27B-4bit-agent" in text
-    assert "cwd dump" in text
+    assert "cwd-child git dump" in text
+    assert "compaction" in text
     assert "envelope" in text.lower()
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
 

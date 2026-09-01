@@ -45,6 +45,8 @@ def test_catalog_sound():
     assert get("auto-sidecar-mtp").status == ADOPTED
     assert get("draft-prefix-cache").status == ADOPTED
     assert get("draft-prefix-cache").needs_trim_cache is False
+    assert get("omp-session-vs-metal").status == ADOPTED
+    assert get("omp-session-vs-metal").needs_trim_cache is False
     assert len(STRATEGIES) >= 10
 
 
