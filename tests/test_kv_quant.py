@@ -56,6 +56,24 @@ def test_draft_reuse_uses_stored_prefix_when_chat_is_reencoded():
     assert draft_reuse([], [1, 2, 3, 4], False, [1, 2, 3]) == (0, [1, 2, 3, 4])
 
 
+def test_prefix_cache_short_followup_hits_system_head():
+    """Turn 1 snapshot of prompt[:-1] includes the gen-prompt token; turn 2 does not."""
+    from slotbank.runtime import PrefixCache, draft_reuse
+
+    pc = PrefixCache(max_bytes=1 << 20)
+    turn1 = list(range(200)) + [90, 91, 92, 93]  # multi-token generation prompt
+    turn2 = list(range(200)) + [7, 8, 9]  # assistant wrap, no gen prompt yet
+    pc._entries = [
+        (turn1[:-1], "full", 1),  # includes gen-prompt tokens 90..92
+        (list(range(128)), "head", 1),
+    ]
+    hit = pc.find(turn2)
+    assert hit is not None and hit[0] == list(range(128))
+    reuse, feed = draft_reuse([1, 2, 9], turn2, True, hit[0])
+    assert reuse == 128
+    assert feed == turn2[128:]
+
+
 def test_prefix_cache_finds_longest_exact_prefix():
     from slotbank.runtime import PrefixCache
 
@@ -91,6 +109,10 @@ def test_snap_points_keep_large_heads(monkeypatch):
     assert 2048 in packed_head
     assert 128 not in packed_head
     assert 256 not in packed_head
+    # Short OMP "hi": full prefix_n includes the generation-prompt token,
+    # which the next turn does not start with. 128 sits inside the system head.
+    short = rt._snap_points(0, 249)
+    assert short == {128}
 
 
 def test_shed_keeps_dflash_session(monkeypatch):
