@@ -9,18 +9,25 @@ from slotbank.tps import (
     DEFERRED,
     IN_TREE,
     M4_AIR_24G,
+    MAC_CLAIM_RUNS,
+    MAC_SPEEDUP_SOURCES,
     REJECTED,
     STRATEGIES,
+    air_scale,
     catalog_sound,
     daily_draft,
     draft_accept_rate,
     get,
     pack_read_ceiling_toks,
+    percent_increase,
     prefill_seconds,
     read_attempts,
     register_attempt,
+    review_mac_speedup,
     scale_draft_block,
     seed_local_log,
+    speedup_times,
+    stress_mac_speedup,
 )
 
 
@@ -74,8 +81,13 @@ def test_catalog_sound():
     assert get("omp-cold-prefill-n").needs_trim_cache is False
     assert get("metal-qmm-prefill").status == DEFERRED
     assert get("ane-npu-prefill").status == REJECTED
+    assert get("qwen-mac-200pct").status == REJECTED
+    assert get("qwen-mac-200pct").changes_target_weights is False
+    assert get("qwen-mac-200pct").needs_trim_cache is False
     assert get("warm-prefix-at-load").status != ADOPTED
     assert len(STRATEGIES) >= 10
+    assert len(MAC_SPEEDUP_SOURCES) >= 100
+    assert len(set(MAC_SPEEDUP_SOURCES)) == len(MAC_SPEEDUP_SOURCES)
 
 
 def test_adopted_routes_keep_27b_text():
@@ -325,3 +337,43 @@ def test_start_request_reads_stable_prefix_before_copying_ids():
     src = inspect.getsource(Runtime.start_request)
     assert "stable_prefix_n" in src
     assert src.index("stable_prefix_n") < src.index("ids = [int(x) for x in input_ids]")
+
+
+def test_percent_increase_and_air_scale():
+    assert percent_increase(83, 274) == pytest.approx(230.12, rel=0.01)
+    assert speedup_times(83, 274) == pytest.approx(3.301, rel=0.01)
+    assert speedup_times(146.6, 65.2, latency=True) == pytest.approx(2.248, rel=0.01)
+    # M3 Max 400 GB/s → Air 120 GB/s is 0.3×.
+    assert air_scale(19.8, 400) == pytest.approx(5.94, rel=0.01)
+    assert air_scale(32.6, 400) == pytest.approx(9.78, rel=0.01)
+
+
+def test_review_mac_speedup_2026():
+    review = review_mac_speedup()
+    assert review["as_of"] == "2026-09-01"
+    assert review["source_count"] >= 100
+    assert review["official_qwen_mac_toks_rows"] == 0
+    assert "omlx-ane-prefill-4k" in review["over_200pct_ids"]
+    assert "omlx-2874-tg" not in review["over_200pct_ids"]
+    assert review["ane_prefill_increase_pct"] >= 200
+    assert review["ane_fits_24g_air"] is False
+    assert review["air_mtp_increase_pct"] == pytest.approx(135.9, rel=0.02)
+    assert review["air_prefill_toks"] == pytest.approx(48.18, rel=0.02)
+    assert review["plus_200pct_would_need_decode"] == pytest.approx(17.13, rel=0.01)
+    # No official Qwen row in the published pairs.
+    assert all(not r.official_qwen for r in MAC_CLAIM_RUNS)
+    # Ollama +93% is the 35B MoE, not dense 27B.
+    ollama = next(r for r in MAC_CLAIM_RUNS if r.id == "ollama-019-mlx-decode")
+    assert "35B-A3B" in ollama.model
+    assert ollama.fits_24g_air is False
+    assert percent_increase(ollama.before, ollama.after) < 100
+
+
+def test_stress_mac_speedup_short():
+    out = stress_mac_speedup(seconds=0.05, cv=0.08)
+    assert out["samples"] > 10
+    assert out["official_over_200_hits"] == 0
+    # Independent 8% CV on both arms: the 83→274 headline stays ≥200% ~80%
+    # of draws (100 s / 43M samples: 0.801). MTP ≥2× is stabler (~0.93).
+    assert out["p_ane_still_over_200"] > 0.75
+    assert out["p_air_mtp_still_over_100"] > 0.85

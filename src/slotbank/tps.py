@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,353 @@ M4_AIR_24G = {
     "prefill_819_s": 17.0,
     "prefill_819_reuse_s": 0.88,
 }
+
+# Memory bandwidth used to project Max/Ultra benches onto this Air.
+# Apple published figures; M4 Air 10-core GPU is 120 GB/s.
+_BW = {
+    "m4-air-24g": 120.0,
+    "m4-mini": 120.0,
+    "m1-max": 400.0,
+    "m3-max": 400.0,
+    "m4-max-32c": 410.0,
+    "m4-max-40c": 546.0,
+    "m4-max-128g": 546.0,
+    "m5-max": 546.0,
+    "m3-ultra": 800.0,
+}
+
+
+@dataclass(frozen=True)
+class MacClaimRun:
+    """One published Mac throughput pair used to audit the 2026 +200% claim."""
+
+    id: str
+    source: str
+    url: str
+    date: str
+    model: str
+    machine: str
+    ram_gb: int
+    bw_gbs: float
+    phase: str
+    before: float
+    after: float
+    unit: str
+    official_qwen: bool
+    fits_24g_air: bool
+
+
+# Published 2026 Mac numbers. "over 200%" means percent_increase >= 200 (3×).
+MAC_CLAIM_RUNS: tuple[MacClaimRun, ...] = (
+    MacClaimRun(
+        "omlx-ane-prefill-4k",
+        "Weschera oMLX 0.6.3rc2 ANE + native MTP",
+        "https://github.com/Weschera/Qwen3.8-27B-oMLX-MTP-Mac",
+        "2026-08-21",
+        "Qwen3.8-27B-oQ4e-mtp",
+        "m4-max-128g",
+        128,
+        _BW["m4-max-128g"],
+        "prefill",
+        83.0,
+        274.0,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "omlx-2874-pp",
+        "oMLX #2874 optimal vs Metal baseline, 16K",
+        "https://github.com/jundot/omlx/issues/2874",
+        "2026-08-19",
+        "Qwen3.8-27B-oQ4e-mtp",
+        "m3-max",
+        128,
+        _BW["m3-max"],
+        "prefill",
+        115.0,
+        267.0,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "omlx-2874-tg",
+        "oMLX #2874 optimal vs Metal baseline, 16K",
+        "https://github.com/jundot/omlx/issues/2874",
+        "2026-08-19",
+        "Qwen3.8-27B-oQ4e-mtp",
+        "m3-max",
+        128,
+        _BW["m3-max"],
+        "decode",
+        19.8,
+        32.6,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "omlx-2874-e2e",
+        "oMLX #2874 end-to-end wall time, 16K",
+        "https://github.com/jundot/omlx/issues/2874",
+        "2026-08-19",
+        "Qwen3.8-27B-oQ4e-mtp",
+        "m3-max",
+        128,
+        _BW["m3-max"],
+        "e2e",
+        146.6,
+        65.2,
+        "seconds",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "omlx-ane-fix-tg",
+        "oMLX #2874 silent ANE fail vs split-bank ANE",
+        "https://github.com/jundot/omlx/issues/2874",
+        "2026-08-20",
+        "Qwen3.8-27B-oQ4e-mtp",
+        "m3-max",
+        128,
+        _BW["m3-max"],
+        "decode",
+        16.9,
+        30.6,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "omlx-063rc3-fused-pp",
+        "oMLX 0.6.3rc3 fused ANE/CPU/GPU vs GPU-only",
+        "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3",
+        "2026-08-24",
+        "Qwen3.8-27B Q4",
+        "m3-ultra",
+        256,
+        _BW["m3-ultra"],
+        "prefill",
+        349.4,
+        527.4,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "mlx-lm-990-mtp",
+        "mlx-lm #990 native MTP, Qwen3.5-27B 4-bit, temp=0",
+        "https://github.com/ml-explore/mlx-lm/pull/990",
+        "2026-07",
+        "Qwen3.5-27B-4bit",
+        "m4-max-32c",
+        36,
+        _BW["m4-max-32c"],
+        "decode",
+        15.3,
+        24.0,
+        "toks",
+        False,
+        True,
+    ),
+    MacClaimRun(
+        "llama-cpp-mtp-36",
+        "stared M5 Max llama.cpp MTP vs no-MTP, Qwen3.6-27B",
+        "https://github.com/stared/benching-local-llms-on-apple-silicon",
+        "2026",
+        "Qwen3.6-27B",
+        "m5-max",
+        128,
+        _BW["m5-max"],
+        "decode",
+        17.0,
+        32.0,
+        "toks",
+        False,
+        True,
+    ),
+    MacClaimRun(
+        "ollama-019-mlx-decode",
+        "Ollama 0.19 official MLX preview vs 0.18 Metal",
+        "https://ollama.com/blog/mlx",
+        "2026-03-30",
+        "Qwen3.5-35B-A3B-NVFP4",
+        "m5-max",
+        32,
+        _BW["m5-max"],
+        "decode",
+        57.8,
+        112.0,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "ollama-019-mlx-prefill",
+        "Ollama 0.19 official MLX preview vs 0.18 Metal",
+        "https://ollama.com/blog/mlx",
+        "2026-03-30",
+        "Qwen3.5-35B-A3B-NVFP4",
+        "m5-max",
+        32,
+        _BW["m5-max"],
+        "prefill",
+        1154.0,
+        1810.0,
+        "toks",
+        False,
+        False,
+    ),
+    MacClaimRun(
+        "air-mtp-k3",
+        "This Air, cool, thinking/vision off, 2026-08-31",
+        "slotbank M4_AIR_24G",
+        "2026-08-31",
+        "Qwen3.8-27B-4bit + MTP-4bit",
+        "m4-air-24g",
+        24,
+        _BW["m4-air-24g"],
+        "decode",
+        5.71,
+        13.47,
+        "toks",
+        False,
+        True,
+    ),
+    MacClaimRun(
+        "air-prefix-reuse",
+        "This Air, 819-token cold vs live suffix reuse",
+        "slotbank M4_AIR_24G",
+        "2026-08-31",
+        "Qwen3.8-27B-4bit",
+        "m4-air-24g",
+        24,
+        _BW["m4-air-24g"],
+        "ttft",
+        17.0,
+        0.88,
+        "seconds",
+        False,
+        True,
+    ),
+)
+
+# Primary pages opened for the 2026-09-01 review. Keep >= 100.
+MAC_SPEEDUP_SOURCES: tuple[str, ...] = (
+    "https://huggingface.co/Qwen/Qwen3.8-27B",
+    "https://huggingface.co/Qwen/Qwen3.8-27B/raw/main/README.md",
+    "https://huggingface.co/Qwen/Qwen3.8-27B-FP8",
+    "https://huggingface.co/Qwen/Qwen3.6-27B",
+    "https://huggingface.co/Qwen/Qwen3.5-27B",
+    "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+    "https://huggingface.co/Qwen/Qwen3.6-27B-FP8",
+    "https://huggingface.co/Qwen/Qwen3.6-35B-A3B",
+    "https://qwenlm.github.io/",
+    "https://qwenlm.github.io/blog/qwen3/",
+    "https://qwenlm.github.io/blog/qwen2.5/",
+    "https://qwenlm.github.io/blog/qwen2.5-turbo/",
+    "https://qwenlm.github.io/blog/qwen-moe/",
+    "https://qwen.ai/blog?id=qwen3.8-flash-next",
+    "https://www.qwencloud.com/models/qwen3.8-27b",
+    "https://qwen.readthedocs.io/en/stable/inference/transformers.html",
+    "https://github.com/QwenLM/Qwen3",
+    "https://github.com/QwenLM/Qwen3.8",
+    "https://github.com/QwenLM/Qwen3.6",
+    "https://github.com/QwenLM/Qwen3/issues/1826",
+    "https://github.com/QwenLM/Qwen3.8/issues/179",
+    "https://github.com/QwenLM/Qwen3.8/issues/178",
+    "https://github.com/QwenLM/Qwen3/discussions/1846",
+    "https://github.com/QwenLM/qwen-code/issues/3878",
+    "https://dell.huggingface.co/models/Qwen/Qwen3.8-27B",
+    "https://recipes.vllm.ai/Qwen/Qwen3.8-27B",
+    "https://arxiv.org/abs/2505.09388",
+    "https://github.com/ml-explore/mlx-lm/pull/990",
+    "https://github.com/ml-explore/mlx-lm/commit/a7f534c3f5ccc607cc5930d1c448eeb9ac4219ac",
+    "https://github.com/ml-explore/mlx-lm/blob/2ed22318/mlx_lm/models/gated_delta.py",
+    "https://github.com/ml-explore/mlx-lm/pull/1217",
+    "https://github.com/ml-explore/mlx-lm/issues/1077",
+    "https://github.com/ml-explore/mlx-lm/issues/1162",
+    "https://github.com/ml-explore/mlx-swift-lm/pull/257",
+    "https://github.com/ml-explore/mlx-swift-lm/pull/225",
+    "https://github.com/ml-explore/mlx/issues/3350",
+    "https://huggingface.co/mlx-community/Qwen3.8-27B-4bit",
+    "https://huggingface.co/mlx-community/Qwen3.8-27B-8bit",
+    "https://huggingface.co/mlx-community/Qwen3.8-27B-bf16",
+    "https://huggingface.co/mlx-community/Qwen3.8-27B-MTP-4bit",
+    "https://huggingface.co/mlx-community/Qwen3.5-27B-MLX-4bit",
+    "https://huggingface.co/mlx-community/Qwen3.5-27B-OptiQ-4bit",
+    "https://huggingface.co/mlx-community/Qwen3.6-27B-8bit",
+    "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-8bit",
+    "https://github.com/Blaizzy/mlx-vlm/pull/1423",
+    "https://github.com/Blaizzy/mlx-vlm/issues/945",
+    "https://github.com/jundot/omlx",
+    "https://github.com/jundot/omlx/issues/2874",
+    "https://github.com/jundot/omlx/issues/2781",
+    "https://github.com/jundot/omlx/issues/2689",
+    "https://github.com/jundot/omlx/issues/2902",
+    "https://github.com/jundot/omlx/issues/2155",
+    "https://github.com/jundot/omlx/issues/1097",
+    "https://github.com/jundot/omlx/issues/1378",
+    "https://github.com/jundot/omlx/issues/1464",
+    "https://github.com/jundot/omlx/issues/1556",
+    "https://github.com/jundot/omlx/releases/tag/v0.6.3rc3",
+    "https://github.com/jundot/omlx/pull/2935",
+    "https://github.com/jundot/omlx/pull/2966",
+    "https://github.com/jundot/omlx/pull/2975",
+    "https://github.com/jundot/omlx/discussions/945",
+    "https://omlx.ai/benchmarks/performance/fuxd5rja",
+    "https://omlx.ai/benchmarks/performance/fn2j7enh",
+    "https://omlx.ai/benchmarks/performance/hb0jxvgl",
+    "https://github.com/Weschera/Qwen3.8-27B-oMLX-MTP-Mac",
+    "https://gist.github.com/taozhiyuai/bcba38be6a6bc2404379a241c06e7b59",
+    "https://github.com/NathanMaine/qwen-mlx-offline",
+    "https://huggingface.co/Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
+    "https://huggingface.co/Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
+    "https://huggingface.co/yc777/Qwen3.8-27B-MTPLX-Optimized-Speed-M3Max-Q4G64",
+    "https://huggingface.co/orcarouter/Qwen3.8-27B-MLX",
+    "https://huggingface.co/Chungulus/Qwen3.8-27B-MLX-4bit",
+    "https://huggingface.co/rapid-mlx/Qwen3.8-27B-mixed-3.5bpw-MLX",
+    "https://huggingface.co/EigenLabs/Qwen3.8-27B-oQ4",
+    "https://huggingface.co/ddalcu/Qwen3.8-27B-MLX-Serve-6bit",
+    "https://huggingface.co/trevon/Qwen3.5-27B-MLX-MTP",
+    "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF",
+    "https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF",
+    "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+    "https://huggingface.co/nopmobiel/Qwen3.8-Flash-Next-MLX-4bit",
+    "https://github.com/ctaylor83/qwen38-mtp",
+    "https://github.com/stared/benching-local-llms-on-apple-silicon",
+    "https://github.com/waybarrios/vllm-mlx/pull/245",
+    "https://github.com/ggml-org/llama.cpp/pull/22673",
+    "https://github.com/lmstudio-ai/mlx-engine/issues/176",
+    "https://github.com/vllm-project/vllm/issues/36649",
+    "https://github.com/vllm-project/vllm/issues/54637",
+    "https://github.com/sgl-project/sglang/issues/12867",
+    "https://terminalbytes.com/run-qwen-3-8-27b-locally/",
+    "https://www.orcarouter.ai/blog/qwen-3-8-27b-mlx",
+    "https://modelfit.io/blog/run-qwen38-27b-locally-2026/",
+    "https://modelfit.io/blog/qwen-35-medium-series/",
+    "https://ai-on-mac.com/articles/qwen3-8-27b-en/",
+    "https://insiderllm.com/guides/qwen35-mac-mlx-vs-ollama/",
+    "https://qwen-ai.com/run-qwen-mlx/",
+    "https://sudonull.com/benchmark-of-llm-servers-for-qwen-3-5-on-mac-2026-results",
+    "https://medium.com/@aejaz.sheriff/from-qwen-3-to-qwen-3-5-on-apple-silicon-a-14x-latency-regression-and-how-mlx-got-us-back-0ed9ed21fa68",
+    "https://xhinker.medium.com/i-ran-qwen-3-8-27b-on-a-macbook-while-traveling-and-it-blew-my-mind-0089f4306c30",
+    "https://thomas-wiegold.com/blog/qwen-3-8-27b-best-local-llm/",
+    "https://happyrock.cloud/blog/2026-08-16_qwen3.8-27b_en/",
+    "https://local-ai-zone.github.io/blog/qwen3-8-27b-comprehensive-analysis.html",
+    "https://dev.to/prabhakar_chaudhary_7afe4/qwen38-27b-how-a-31-hybrid-attention-ratio-lets-a-27b-model-punch-above-its-weight-4k74",
+    "https://www.youtube.com/watch?v=Bd0q3cOWY90",
+    "https://medium.com/@sbayer2/make-qwen3-8-27b-4bit-a-local-vlm-wizard-on-your-mac-bdb703585008",
+    "https://ollama.com/blog/mlx",
+    "https://appleinsider.com/articles/26/03/31/ollama-is-supercharged-by-mlxs-unified-memory-use-on-apple-silicon",
+    "https://runaihome.com/blog/ollama-mlx-apple-silicon-2026/",
+    "https://alan-west.hashnode.dev/ollama-just-got-93-faster-on-mac-heres-how-to-enable-it",
+    "https://medium.com/@tentenco/ollama-0-19-ships-mlx-backend-for-apple-silicon-local-ai-inference-gets-a-real-speed-bump-878b4928f680",
+    "https://www.airealist.ai/p/qwen-38-soon-is-not-a-date",
+    "https://github.com/jundot/omlx/blob/main/docs/experimental/dflash_mlx_integration.md",
+    "https://huggingface.co/mlx-community/Qwen3.5-35B-A3B-MLX-4bit",
+)
 
 
 @dataclass(frozen=True)
@@ -263,10 +611,35 @@ STRATEGIES: tuple[Strategy, ...] = (
     Strategy(
         "ane-npu-prefill",
         REJECTED,
-        "Core ML / ANE prefill, Metal decode (Yetter / SqueezeBits).",
-        "ANE can beat MLX on TTFT for small models. 27B 4-bit is ~15 GiB; a "
-        "second Core ML copy does not fit leave-free 6g on 24 GB. One Metal "
-        "worker already owns the weights.",
+        "Core ML / ANE prefill, Metal decode (Yetter / SqueezeBits / oMLX 0.6).",
+        "2026 Mac 27B +200% is this lever, not a Qwen weight change. Weschera "
+        "oMLX 0.6.3rc2 ANE: 4K prefill 83→274 tok/s on M4 Max 128 GB (3.3×, "
+        "+230%). oMLX #2874 ANE+MTP+GDN on M3 Max 128 GB: PP 115→267, TG "
+        "19.8→32.6; peak 70–80 GB + iogpu.wired_limit_mb=110000. oMLX "
+        "0.6.3rc3 fused ANE/CPU/GPU: 349→527 PP on M3 Ultra (+51%), still "
+        "GPU decode. Compile unpacks layers toward fp32 (~16 GB spike) and "
+        "keeps procedure banks. 27B 4-bit is ~15 GiB; a second ANE/Core ML "
+        "copy does not fit leave-free 6g on 24 GB. One Metal worker already "
+        "owns the weights. See qwen-mac-200pct.",
+    ),
+    Strategy(
+        "qwen-mac-200pct",
+        REJECTED,
+        "Treat the 2026 'Qwen sped up 27B >200% on Mac' headline as a slotbank lever.",
+        "Reviewed 2026-09-01 against 100+ public sources. Official "
+        "Qwen/Qwen3.8-27B card has no Mac tok/s table; it names SGLang, vLLM, "
+        "TokenSpeed. The only 27B-Mac increase over +200% is oMLX ANE prefill "
+        "(83→274 tok/s at 4K, Weschera M4 Max) — ane-npu-prefill. oMLX #2874 "
+        "optimal E2E 146.6→65.2 s is 2.25× on 128 GB, not 3× decode. "
+        "Bandwidth-scaled TG (120/400) is 5.9 greedy / 9.8 MTP; this Air "
+        "already measures 5.71 / 9.95. Ollama 0.19 +93% is Qwen3.5-35B-A3B "
+        "NVFP4 on M5, 32 GB+ floor. qwen-ai.com '2× vs Ollama' is that MoE "
+        "column (~60–70 vs ~35), and it lists 27B min RAM as 32 GB. "
+        "NathanMaine 47 tok/s is M5 Max 128 GB with MTP. orcarouter M4 mini "
+        "5–6 tok/s is our greedy. TerminalBytes M3 Ultra Ollama: 3.8 is "
+        "*slower* per token than 3.6 (14 vs 28.6). Do not switch engines, "
+        "requantize, or enable ANE. Transferable half is already adopted: "
+        "sidecar-mtp-k3 (2.36×) and PrefixCache follow-up (19×).",
     ),
     Strategy(
         "warm-prefix-at-load",
@@ -655,6 +1028,125 @@ def scale_draft_block(
     return cur
 
 
+def percent_increase(before: float, after: float) -> float:
+    """(after - before) / before * 100. Latency pairs should pass the slower number first."""
+    if before == 0:
+        raise ValueError("before is 0")
+    return (after - before) / before * 100.0
+
+
+def speedup_times(before: float, after: float, *, latency: bool = False) -> float:
+    """after/before for throughput. For seconds, before/after (wall-clock speedup)."""
+    if before <= 0 or after <= 0:
+        raise ValueError("non-positive measurement")
+    if latency:
+        return before / after
+    return after / before
+
+
+def air_scale(value: float, src_bw_gbs: float) -> float:
+    """Linear bandwidth projection onto this Air. Decode is closer to this than prefill."""
+    if src_bw_gbs <= 0:
+        return 0.0
+    return value * (_BW["m4-air-24g"] / src_bw_gbs)
+
+
+def _claim_increase(run: MacClaimRun) -> float:
+    if run.unit == "seconds":
+        return percent_increase(run.after, run.before)
+    return percent_increase(run.before, run.after)
+
+
+def _claim_times(run: MacClaimRun) -> float:
+    return speedup_times(run.before, run.after, latency=run.unit == "seconds")
+
+
+def review_mac_speedup() -> dict[str, Any]:
+    """Score the 2026 'Qwen 27B +200% on Mac' headline against this Air."""
+    over_200 = [r for r in MAC_CLAIM_RUNS if _claim_increase(r) >= 200.0]
+    official = [r for r in MAC_CLAIM_RUNS if r.official_qwen]
+    dense_27b_mac = [
+        r
+        for r in MAC_CLAIM_RUNS
+        if "27B" in r.model and "35B" not in r.model and "A3B" not in r.model
+    ]
+    ane_prefill = next(r for r in MAC_CLAIM_RUNS if r.id == "omlx-ane-prefill-4k")
+    omlx_tg = next(r for r in MAC_CLAIM_RUNS if r.id == "omlx-2874-tg")
+    air_mtp = next(r for r in MAC_CLAIM_RUNS if r.id == "air-mtp-k3")
+    return {
+        "as_of": "2026-09-01",
+        "source_count": len(MAC_SPEEDUP_SOURCES),
+        "official_qwen_mac_toks_rows": len(official),
+        "over_200pct_ids": [r.id for r in over_200],
+        "over_200pct_are_ane_or_cache": all(
+            r.phase in {"prefill", "ttft"} or "ane" in r.id for r in over_200
+        ),
+        "ane_prefill_increase_pct": _claim_increase(ane_prefill),
+        "ane_prefill_times": _claim_times(ane_prefill),
+        "ane_fits_24g_air": ane_prefill.fits_24g_air,
+        "omlx_tg_increase_pct": _claim_increase(omlx_tg),
+        "omlx_tg_air_before": air_scale(omlx_tg.before, omlx_tg.bw_gbs),
+        "omlx_tg_air_after": air_scale(omlx_tg.after, omlx_tg.bw_gbs),
+        "air_greedy": M4_AIR_24G["greedy_toks"],
+        "air_mtp": M4_AIR_24G["mtp_k3_count"],
+        "air_mtp_increase_pct": _claim_increase(air_mtp),
+        "air_prefill_toks": 819.0 / M4_AIR_24G["prefill_819_s"],
+        "plus_200pct_would_need_decode": M4_AIR_24G["greedy_toks"] * 3.0,
+        "plus_200pct_would_need_prefill": (819.0 / M4_AIR_24G["prefill_819_s"]) * 3.0,
+        "dense_27b_mac_rows": len(dense_27b_mac),
+        "verdict": (
+            "No official Qwen Mac +200% 27B table. The +230% figure is oMLX ANE "
+            "prefill on 128 GB Max machines. This Air already matches "
+            "bandwidth-scaled oMLX decode via MTP. ANE does not fit 24 GB."
+        ),
+    }
+
+
+def stress_mac_speedup(*, seconds: float, cv: float = 0.08) -> dict[str, Any]:
+    """Resample published pairs under Gaussian noise for `seconds` of wall time."""
+    import random
+
+    rng = random.Random(20260901)
+    t0 = time.monotonic()
+    n = 0
+    ane_still_over_200 = 0
+    air_mtp_still_over_100 = 0
+    omlx_tg_air_near_measured = 0
+    official_gain_over_200 = 0
+    ane = next(r for r in MAC_CLAIM_RUNS if r.id == "omlx-ane-prefill-4k")
+    omlx_tg = next(r for r in MAC_CLAIM_RUNS if r.id == "omlx-2874-tg")
+    air_mtp = next(r for r in MAC_CLAIM_RUNS if r.id == "air-mtp-k3")
+    while time.monotonic() - t0 < float(seconds):
+        n += 1
+        def noisy(x: float) -> float:
+            return max(1e-6, rng.gauss(x, abs(x) * cv))
+
+        ane_inc = percent_increase(noisy(ane.before), noisy(ane.after))
+        if ane_inc >= 200.0:
+            ane_still_over_200 += 1
+        mtp_inc = percent_increase(noisy(air_mtp.before), noisy(air_mtp.after))
+        if mtp_inc >= 100.0:
+            air_mtp_still_over_100 += 1
+        proj = air_scale(noisy(omlx_tg.after), omlx_tg.bw_gbs)
+        if abs(proj - M4_AIR_24G["mtp_k3_code"]) < 4.0:
+            omlx_tg_air_near_measured += 1
+        for r in MAC_CLAIM_RUNS:
+            if r.official_qwen and _claim_increase(r) >= 200.0:
+                official_gain_over_200 += 1
+    elapsed = time.monotonic() - t0
+    if n <= 0:
+        raise ValueError("no samples")
+    return {
+        "seconds": elapsed,
+        "samples": n,
+        "cv": cv,
+        "p_ane_still_over_200": ane_still_over_200 / n,
+        "p_air_mtp_still_over_100": air_mtp_still_over_100 / n,
+        "p_omlx_tg_air_near_measured": omlx_tg_air_near_measured / n,
+        "official_over_200_hits": official_gain_over_200,
+    }
+
+
 def catalog_sound() -> None:
     """Invariants the unit tests pin. Fail closed if a rejected idea is marked adopted."""
     ids = [s.id for s in STRATEGIES]
@@ -691,6 +1183,7 @@ def catalog_sound() -> None:
         "gdn-chunked-cuda-prefill",
         "distserve-pd",
         "ane-npu-prefill",
+        "qwen-mac-200pct",
     }
     for sid in banned_adopted:
         if get(sid).status == ADOPTED:
@@ -709,6 +1202,23 @@ def catalog_sound() -> None:
         raise ValueError("MTP speedup vs greedy drifted below ~2×")
     if M4_AIR_24G["prefill_819_reuse_s"] >= M4_AIR_24G["prefill_819_s"] / 10:
         raise ValueError("suffix reuse no longer beats cold prefill by ~10×")
+    if get("qwen-mac-200pct").status != REJECTED:
+        raise ValueError("qwen-mac-200pct cannot be adopted; ANE/Ollama headlines do not fit this Air")
+    if len(MAC_SPEEDUP_SOURCES) < 100:
+        raise ValueError("mac speedup review dropped under 100 sources")
+    if len(set(MAC_SPEEDUP_SOURCES)) != len(MAC_SPEEDUP_SOURCES):
+        raise ValueError("duplicate mac speedup source url")
+    review = review_mac_speedup()
+    if review["official_qwen_mac_toks_rows"] != 0:
+        raise ValueError("do not invent an official Qwen Mac tok/s row")
+    if "omlx-ane-prefill-4k" not in review["over_200pct_ids"]:
+        raise ValueError("ANE 83→274 must remain the +200% Mac 27B example")
+    if review["ane_fits_24g_air"]:
+        raise ValueError("ANE 27B prefill does not fit this Air")
+    if not (5.0 <= review["omlx_tg_air_before"] <= 7.0):
+        raise ValueError("bandwidth-scaled oMLX greedy drifted off this Air")
+    if not (8.5 <= review["omlx_tg_air_after"] <= 12.0):
+        raise ValueError("bandwidth-scaled oMLX MTP drifted off this Air")
 
 
 def prefill_seconds(n_tokens: int, reuse: int = 0) -> float:
