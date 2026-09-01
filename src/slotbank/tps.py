@@ -293,9 +293,10 @@ STRATEGIES: tuple[Strategy, ...] = (
         "OMP still failed on 400/jetsam when the client sent 26k–39k tokens. "
         "slotbank serve now defaults SLOTBANK_ENVELOPE=1. Condense keeps ask + "
         "citations; slim_tools drops JSON schemas (the catalog alone is >16k); "
-        "keep_token_ids packs any leftover to 10240. Prefix cache reuses the "
-        "stable system head so later turns skip that prefill. Does not page "
-        "hybrid KV and does not change 27B weights. --no-envelope restores 400.",
+        "keep_token_ids packs any leftover to 10240. Prefix cache now runs on "
+        "the MTP path (draft-prefix-cache) so later turns skip the system-head "
+        "prefill. Does not page hybrid KV and does not change 27B weights. "
+        "--no-envelope restores 400.",
     ),
     Strategy(
         "qwen35-4b-as-27b-drafter",
@@ -325,6 +326,17 @@ STRATEGIES: tuple[Strategy, ...] = (
         "If --draft is omitted, attach a sibling MTP-4bit (else DFlash) that admits.",
         "Serve without --draft was greedy 5.71 tok/s. Same 27B weights; mlx-vlm verify.",
         extra_drafter=True,
+    ),
+    Strategy(
+        "draft-prefix-cache",
+        ADOPTED,
+        "PrefixCache + pyramid tiles on the MTP/DFlash path. Exact prefix only; no GDN trim.",
+        "Daily serve uses --draft, so PrefixCache used to be greedy-only and every OMP "
+        "turn re-encoded the chat (not an append of _fed_ids) and paid a cold 10k prefill. "
+        "_iter_draft now restores the longest exact snapshot into a new cache, pyramid-tiles "
+        "the gap, and leaves mlx-vlm generate_step the last token + rollback. Live append "
+        "still wins when the client is append-only. SLOTBANK_PREFIX_CACHE_MIB defaults to "
+        "1024 so a 10k envelope prefix fits (~640 MiB attn KV + GDN). Does not page hybrid KV.",
     ),
 )
 
