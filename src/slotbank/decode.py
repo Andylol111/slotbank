@@ -52,7 +52,13 @@ def completion_cap(requested: int | None) -> int:
 
 
 class SpecialHoldback:
-    """Hold a suffix that might still become a stop token (`<|im` + `_end|>`)."""
+    """Stream the answer only: drop think blocks and hold stop-token prefixes.
+
+    Qwen's chat template opens ``<think>`` in the *prompt* when thinking is on,
+    so the completion is analysis + ``</think>`` + answer + ``<|im_end|>``.
+    OMP then prints that as the message. Hold ``<think>``…``</think>`` (and a
+    close tag with no open) and never emit ``<|im_end|>``.
+    """
 
     def __init__(self, stops: tuple[str, ...] = QWEN_STOPS):
         self.stops = stops
@@ -60,8 +66,15 @@ class SpecialHoldback:
 
     def push(self, piece: str) -> str:
         self._buf += piece or ""
+        self._drop_think()
+        open_m = _THINK_OPEN.search(self._buf)
+        close_m = _THINK_CLOSE.search(self._buf)
+        if open_m and not close_m:
+            emit = strip_special(self._buf[: open_m.start()])
+            self._buf = self._buf[open_m.start():]
+            return emit
         hold = 0
-        for s in self.stops:
+        for s in (*self.stops, "<think>", "</think>"):
             for i in range(1, len(s)):
                 if self._buf.endswith(s[:i]):
                     hold = max(hold, i)
@@ -70,9 +83,26 @@ class SpecialHoldback:
         return strip_special(emit)
 
     def flush(self) -> str:
+        self._drop_think()
+        open_m = _THINK_OPEN.search(self._buf)
+        if open_m:
+            self._buf = self._buf[: open_m.start()]
         out = strip_special(self._buf)
         self._buf = ""
         return out
+
+    def _drop_think(self) -> None:
+        while self._buf:
+            m = _THINK.search(self._buf)
+            if m:
+                self._buf = self._buf[: m.start()] + self._buf[m.end():].lstrip("\n")
+                continue
+            close_m = _THINK_CLOSE.search(self._buf)
+            open_m = _THINK_OPEN.search(self._buf)
+            if close_m and (open_m is None or open_m.start() > close_m.start()):
+                self._buf = self._buf[close_m.end():].lstrip("\n")
+                continue
+            break
 
 
 def split_think(text: str) -> tuple[str, str]:

@@ -48,6 +48,18 @@ def models_yml_path() -> Path:
     return Path.home() / ".omp" / "agent" / "models.yml"
 
 
+def display_name(model_id: str, *, tools: bool = False) -> str:
+    """Short OMP pane label. ``Qwen3.8-27B-4bit-agent (slotbank)`` truncates."""
+    base = model_id or "model"
+    if base.endswith("-agent"):
+        base = base[: -len("-agent")]
+    for suf in ("-4bit", "-8bit", "-bf16"):
+        if base.endswith(suf):
+            base = base[: -len(suf)]
+            break
+    return f"{base} tools" if tools else base
+
+
 def selector(model_id: str) -> str:
     """The /model row OMP 18 actually shows (local llama.cpp engine)."""
     return f"{LLAMA_PROVIDER}/{model_id}"
@@ -107,7 +119,6 @@ def render_provider(
     lines.append("    models:")
     lines.extend(_model_entry(
         model_id=model_id,
-        thinking=False,
         vision=vision,
         context_window=context_window,
         max_tokens=max_tokens,
@@ -116,7 +127,6 @@ def render_provider(
     ))
     lines.extend(_model_entry(
         model_id=f"{model_id}-agent",
-        thinking=thinking,
         vision=vision,
         context_window=context_window,
         max_tokens=max_tokens,
@@ -129,7 +139,6 @@ def render_provider(
 def _model_entry(
     *,
     model_id: str,
-    thinking: bool,
     vision: bool,
     context_window: int,
     max_tokens: int,
@@ -137,20 +146,15 @@ def _model_entry(
     api: str,
 ) -> list[str]:
     inputs = "[text, image]" if vision else "[text]"
-    name = f"{model_id} (slotbank)"
-    reason = "true" if thinking else "false"
+    name = display_name(model_id, tools=tools)
     lines = [
         f"      - id: {_y(model_id)}",
         f"        name: {_y(name)}",
-        f"        reasoning: {reason}",
+        # Thinking off in OMP: Qwen opens <think> in the prompt, so the
+        # stream is analysis + </think> + answer. reasoning:true made that
+        # the visible message. /think in the last ask still turns it on.
+        "        reasoning: false",
     ]
-    if thinking:
-        lines.extend([
-            "        thinking:",
-            "          mode: effort",
-            "          efforts: [low, medium, high, xhigh]",
-            "          defaultLevel: low",
-        ])
     lines.extend([
         f"        input: {inputs}",
         "        tokenizer: qwen3",
@@ -162,11 +166,6 @@ def _model_entry(
         # of a few thousand tokens needs minutes, not the default ~60s abort.
         "          streamIdleTimeoutMs: 600000",
     ])
-    if api == "openai-completions":
-        lines.extend([
-            "          thinkingFormat: qwen-chat-template",
-            "          supportsReasoningParams: true",
-        ])
     return lines
 
 
@@ -275,9 +274,10 @@ def compose_models_yml(
         "# Cloud subscription still keeps the full harness if you have one.",
         "# A cwd-child git dump (~39k) must not trip OMP compaction; contextWindow",
         "# is the OMP session (64k), not Metal (8k envelope). Prefer the no-tools",
-        "# picker for hi. -agent is tools+thinking. Empty dir, not /tmp with a",
-        "# child git (footer dumps that tree). maxTokens 2048, thinking low.",
-        "# Serve envelopes what 27B prefills.",
+        "# picker for hi. -agent is tools only (no OMP thinking UI). Empty dir,",
+        "# not /tmp with a child git. Put /think on the last ask to reason;",
+        "# default is Qwen /no_think + instruct sampling (0.7/0.8/20).",
+        "# Serve envelopes what 27B prefills. Names are short so the pane fits.",
         "providers:",
     ]
     for _, block in others:

@@ -496,7 +496,7 @@ def _generate(args) -> int:
 
 def _omp(args) -> int:
     from slotbank.admit import public_model_id
-    from slotbank.omp import agent_selector, lm_studio_selector, selector, upsert
+    from slotbank.omp import agent_selector, display_name, lm_studio_selector, selector, upsert
 
     path = None
     try:
@@ -514,13 +514,14 @@ def _omp(args) -> int:
         vision=bool(getattr(args, "vision", False)),
     )
     print(f"wrote {written}")
-    print(f"picker: {selector(mid)}          (no tools; fast hi)")
-    print(f"agent:  {agent_selector(mid)}  (tools + thinking)")
+    print(f"picker: {selector(mid)}          ({display_name(mid)}; no tools)")
+    print(f"agent:  {agent_selector(mid)}  ({display_name(mid, tools=True)}; tools, no think UI)")
     print(f"also:   {lm_studio_selector(mid)}")
     print("then:   omp models refresh")
     print("        serve envelopes OMP dumps (condense + slim tools + pack)")
     print("        OMP session 64k (compaction); Metal envelope 8k")
     print("        empty dir for hi — /tmp with a child git dumps that tree")
+    print("        Qwen /no_think by default; put /think on the last ask to reason")
     print("        cloud subscription still keeps the full harness if you have one")
     print("        wait for serve 'ready' before sending (~30s 27B load is normal)")
     return 0
@@ -533,7 +534,7 @@ def _serve(args) -> int:
 
     from slotbank.admit import public_model_id
     from slotbank.api.app import EngineProxy, LoadingEngine, create_app
-    from slotbank.omp import agent_selector, lm_studio_selector, selector, upsert
+    from slotbank.omp import agent_selector, display_name, lm_studio_selector, selector, upsert
     from slotbank.prompt import max_prompt_tokens
     from slotbank.registry import local_path, resolve
 
@@ -584,13 +585,14 @@ def _serve(args) -> int:
     omp_lines = ""
     if omp_path is not None:
         omp_lines = (
-            f"\n  OMP picker                 {selector(mid)}  (no tools; fast hi)\n"
-            f"  OMP agent                  {agent_selector(mid)}\n"
+            f"\n  OMP picker                 {selector(mid)}  ({display_name(mid)}; no tools)\n"
+            f"  OMP agent                  {agent_selector(mid)}  ({display_name(mid, tools=True)})\n"
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
             f"  first hi                   wait for 'ready' (~30s 27B load). "
-            f"Use {selector(mid)} not -agent. Empty dir, not /tmp with a child git."
+            f"Use {selector(mid)} not -agent. Empty dir, not /tmp with a child git. "
+            f"/no_think is default; /think on the last ask to reason."
         )
     proxy = EngineProxy(LoadingEngine(mid))
     app = create_app(proxy, api_key=args.api_key)

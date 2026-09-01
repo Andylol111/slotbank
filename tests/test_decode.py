@@ -77,6 +77,23 @@ def test_special_holdback_keeps_real_text():
     assert scrub.flush() == ""
 
 
+def test_special_holdback_drops_think_then_answer():
+    scrub = SpecialHoldback()
+    blob = (
+        'The user just said "hi". This is a simple greeting.</think>\n'
+        "Hey! What are you working on in slotbank?<|im_end|>"
+    )
+    assert scrub.push(blob) == "Hey! What are you working on in slotbank?"
+    assert scrub.flush() == ""
+
+
+def test_special_holdback_holds_open_think():
+    scrub = SpecialHoldback()
+    assert scrub.push("<think>plan") == ""
+    assert scrub.push("</think>\nHi there.<|im_end|>") == "Hi there."
+    assert scrub.flush() == ""
+
+
 def test_completion_cap(monkeypatch):
     monkeypatch.delenv("SLOTBANK_MAX_COMPLETION", raising=False)
     assert completion_cap(8192) == 2048

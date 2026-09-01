@@ -12,6 +12,8 @@ class SamplingParams:
     ignore_eos: bool = False
     max_tokens: int = 1024
     stop_strs: list[str] = field(default_factory=list)
+    # Qwen3.8 /think vs /no_think. None = not an OMP/Qwen turn.
+    qwen_mode: str | None = None
 
     @property
     def is_greedy(self) -> bool:

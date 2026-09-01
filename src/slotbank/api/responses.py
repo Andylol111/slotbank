@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from slotbank.load import EngineNotReady
-from slotbank.prompt import _text_of
+from slotbank.prompt import _text_of, hide_think_from_client, qwen_mode_of
 from slotbank.types import SamplingParams
 
 
@@ -134,6 +134,7 @@ def register_responses(app: FastAPI, engine) -> None:
             top_p=1.0 if req.top_p is None else float(req.top_p),
             top_k=-1 if req.top_k is None else int(req.top_k),
             max_tokens=int(req.max_output_tokens or 1024),
+            qwen_mode=qwen_mode_of(chat),
         )
         rid = f"resp_{uuid.uuid4().hex}"
         created = int(time.time())
@@ -185,7 +186,7 @@ def _response(rid: str, created: int, model: str, status: str, output: list, usa
 
 def _full(result, model: str, rid: str, created: int) -> dict:
     output: list[dict[str, Any]] = []
-    if result.reasoning:
+    if result.reasoning and not hide_think_from_client():
         output.append({
             "id": f"rs_{uuid.uuid4().hex}",
             "type": "reasoning",

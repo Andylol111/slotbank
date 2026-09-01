@@ -8,6 +8,7 @@ from slotbank.admit import discover_sidecar_draft, public_model_id
 from slotbank.omp import (
     BEGIN,
     compose_models_yml,
+    display_name,
     render_provider,
     selector,
     upsert,
@@ -88,8 +89,13 @@ def test_render_provider_is_current_omp_schema():
     assert "id: Qwen3.8-27B-4bit-agent" in text
     assert "supportsTools: false" in text
     assert "supportsTools: true" in text
-    assert "reasoning: true" in text
     assert "reasoning: false" in text
+    assert "reasoning: true" not in text
+    assert "defaultLevel:" not in text
+    assert "thinkingFormat:" not in text
+    assert "name: Qwen3.8-27B\n" in text
+    assert 'name: "Qwen3.8-27B tools"' in text
+    assert "(slotbank)" not in text
     assert "input: [text, image]" in text
     assert "streamIdleTimeoutMs: 600000" in text
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
@@ -99,7 +105,7 @@ def test_render_provider_is_current_omp_schema():
     )
     assert "  llama.cpp:" in llama
     assert "api: openai-completions" in llama
-    assert "thinkingFormat: qwen-chat-template" in llama
+    assert "thinkingFormat:" not in llama
     assert "streamIdleTimeoutMs: 600000" in llama
     assert "discovery:" not in llama
 
@@ -131,18 +137,22 @@ providers:
     assert "api: anthropic-messages" in text
     assert "api: openai-completions" in text
     assert "timeoutMs: 30000" in text
-    assert "thinkingFormat: qwen-chat-template" in text
+    assert "thinkingFormat:" not in text
     assert "discovery:" not in _block(text, "llama.cpp")
     assert "discovery:" not in _block(text, "lm-studio")
     assert "type: openai-models-list" in _block(text, "slotbank")
     assert "contextWindow: 65536" in text
     assert "maxTokens: 2048" in text
-    assert "defaultLevel: low" in text
+    assert "defaultLevel:" not in text
+    assert "name: Qwen3.8-27B\n" in text
+    assert 'name: "Qwen3.8-27B tools"' in text
     assert "Qwen3.8-27B-4bit-agent" in text
     assert "cwd-child git dump" in text
     assert "compaction" in text
     assert "envelope" in text.lower()
     assert selector("Qwen3.8-27B-4bit") == "llama.cpp/Qwen3.8-27B-4bit"
+    assert display_name("Qwen3.8-27B-4bit") == "Qwen3.8-27B"
+    assert display_name("Qwen3.8-27B-4bit-agent", tools=True) == "Qwen3.8-27B tools"
 
 
 def test_upsert_roundtrip(tmp_path, monkeypatch):

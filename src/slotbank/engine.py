@@ -8,7 +8,7 @@ from typing import Callable, Iterator
 
 from slotbank.decode import completion_cap, finish_text, merge_stops, SpecialHoldback
 from slotbank.layout import parse_byte_size
-from slotbank.prompt import encode_chat, encode_text
+from slotbank.prompt import apply_qwen_sampling, encode_chat, encode_text
 from slotbank.types import GenResult, SamplingParams
 
 
@@ -82,7 +82,9 @@ class Engine:
             ignore_eos=sampling.ignore_eos,
             max_tokens=completion_cap(sampling.max_tokens),
             stop_strs=merge_stops(sampling.stop_strs),
+            qwen_mode=sampling.qwen_mode,
         )
+        sampling = apply_qwen_sampling(sampling, sampling.qwen_mode)
         job = Job(input_ids=input_ids, sampling=sampling, out=queue.Queue())
         self._jobs.put(job)
         pieces: list[str] = []

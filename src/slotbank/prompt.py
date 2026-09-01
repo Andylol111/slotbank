@@ -39,6 +39,11 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def hide_think_from_client() -> bool:
+    """OMP envelope streams the answer only — no reasoning_content / thinking block."""
+    return _envelope_on()
+
+
 def _flag(name: str, default: str = "") -> bool:
     return os.environ.get(name, default).strip().lower() in {
         "1", "true", "yes", "on",
@@ -83,6 +88,100 @@ def with_direct(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         head["content"] = text + ("\n\n" + body if body else "")
         return [head, *messages[1:]]
     return [{"role": "system", "content": text}, *messages]
+
+
+_NO_THINK_SW = re.compile(r"/no_think\b", re.IGNORECASE)
+_THINK_SW = re.compile(r"/think\b", re.IGNORECASE)
+
+# Qwen3.8 documented instruct vs thinking sampling. Applied only when the
+# client sent the harness default (~1.0), so greedy CLI and an explicit
+# 0.2 stay put. This is the model's own pair, not an OMP yaml temperature.
+_QWEN_INSTRUCT = (0.7, 0.8, 20)
+_QWEN_THINKING = (0.6, 0.95, 20)
+
+
+def _last_user_index(messages: list[dict[str, Any]]) -> int | None:
+    last = None
+    for i, m in enumerate(messages):
+        if (m.get("role") or "") == "user":
+            last = i
+    return last
+
+
+def _ask_for_switch(text: str) -> str:
+    """Only the last short ask, not an OMP cwd dump that might mention /think."""
+    if not text:
+        return ""
+    _, ask = _last_ask(text, 256)
+    return (ask or text[-240:]).strip()
+
+
+def qwen_mode_of(messages: list[dict[str, Any]] | None) -> str:
+    """Qwen3.8 native switch: /think or /no_think on the last ask.
+
+    Serve envelope defaults to no_think so OMP prints the answer, not a
+    think dump. CLI ``--thinking`` without envelope still thinks.
+    """
+    if not messages:
+        if _envelope_on():
+            return "no_think"
+        return "think" if _thinking_on() else "no_think"
+    idx = _last_user_index(messages)
+    hay = _ask_for_switch(_text_of(messages[idx].get("content"))) if idx is not None else ""
+    if _NO_THINK_SW.search(hay):
+        return "no_think"
+    if _THINK_SW.search(hay):
+        return "think"
+    if _envelope_on():
+        return "no_think"
+    return "think" if _thinking_on() else "no_think"
+
+
+def with_qwen_mode(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append /no_think on the last user turn for the OMP envelope.
+
+    Qwen's template reads that switch. It is unique to this model, not an
+    OMP harness temperature or thinking-effort field.
+    """
+    if not messages or not _envelope_on():
+        return messages
+    if qwen_mode_of(messages) == "think":
+        return messages
+    idx = _last_user_index(messages)
+    if idx is None:
+        return messages
+    out = [dict(m) for m in messages]
+    text = _text_of(out[idx].get("content"))
+    if _NO_THINK_SW.search(text):
+        return out
+    out[idx]["content"] = (text.rstrip() + "\n/no_think") if text.strip() else "/no_think"
+    return out
+
+
+def apply_qwen_sampling(sp, mode: str | None = None):
+    """Map OMP's default temp 1.0 onto Qwen's documented instruct/think pair."""
+    from slotbank.types import SamplingParams
+
+    if not isinstance(sp, SamplingParams):
+        return sp
+    if not _envelope_on():
+        return sp
+    raw = os.environ.get("SLOTBANK_QWEN_SAMPLING", "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return sp
+    mode = mode or sp.qwen_mode or "no_think"
+    if float(sp.temperature) < 0.99:
+        return sp
+    temp, top_p, top_k = _QWEN_THINKING if mode == "think" else _QWEN_INSTRUCT
+    return SamplingParams(
+        temperature=temp,
+        top_p=top_p if float(sp.top_p) >= 0.99 else sp.top_p,
+        top_k=top_k if int(sp.top_k) < 1 else sp.top_k,
+        ignore_eos=sp.ignore_eos,
+        max_tokens=sp.max_tokens,
+        stop_strs=list(sp.stop_strs or []),
+        qwen_mode=mode,
+    )
 
 
 def with_context_os(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -443,6 +542,7 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
         msgs = condense_harness_messages(msgs)
     if _condense_on() or _envelope_on():
         tools = slim_tools(tools)
+    msgs = with_qwen_mode(msgs)
     apply = getattr(tokenizer, "apply_chat_template", None)
 
     def plain() -> list[int]:
@@ -454,7 +554,7 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
-        "enable_thinking": _thinking_on(),
+        "enable_thinking": qwen_mode_of(msgs) == "think",
     }
     if tools:
         kwargs["tools"] = tools

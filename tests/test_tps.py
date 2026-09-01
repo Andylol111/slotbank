@@ -47,6 +47,8 @@ def test_catalog_sound():
     assert get("draft-prefix-cache").needs_trim_cache is False
     assert get("omp-session-vs-metal").status == ADOPTED
     assert get("omp-session-vs-metal").needs_trim_cache is False
+    assert get("qwen-no-think-prompt").status == ADOPTED
+    assert get("qwen-no-think-prompt").needs_trim_cache is False
     assert len(STRATEGIES) >= 10
 
 

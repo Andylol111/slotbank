@@ -56,6 +56,73 @@ def test_encode_chat_thinking_defaults_off(monkeypatch):
     assert seen.get("enable_thinking") is False
 
 
+def test_encode_chat_envelope_injects_no_think(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    monkeypatch.setenv("SLOTBANK_THINKING", "1")
+    got = {}
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            got["msgs"] = msgs
+            got["kwargs"] = k
+            return [1]
+
+        def encode(self, text):
+            return [0]
+
+    encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    assert got["kwargs"].get("enable_thinking") is False
+    assert got["msgs"][-1]["content"].rstrip().endswith("/no_think")
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+
+
+def test_encode_chat_envelope_honors_think_switch(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    got = {}
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            got["msgs"] = msgs
+            got["kwargs"] = k
+            return [1]
+
+        def encode(self, text):
+            return [0]
+
+    encode_chat(Tok(), [{"role": "user", "content": "hi\n/think"}], None)
+    assert got["kwargs"].get("enable_thinking") is True
+    assert "/no_think" not in got["msgs"][-1]["content"]
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+
+
+def test_apply_qwen_sampling_maps_omp_default(monkeypatch):
+    from slotbank.prompt import apply_qwen_sampling
+    from slotbank.types import SamplingParams
+
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    harness = SamplingParams(temperature=1.0, top_p=1.0, top_k=-1, max_tokens=128)
+    instruct = apply_qwen_sampling(harness, "no_think")
+    assert instruct.temperature == 0.7
+    assert instruct.top_p == 0.8
+    assert instruct.top_k == 20
+    think = apply_qwen_sampling(harness, "think")
+    assert think.temperature == 0.6
+    assert think.top_p == 0.95
+    keep = apply_qwen_sampling(
+        SamplingParams(temperature=0.2, top_p=1.0, top_k=-1), "no_think",
+    )
+    assert keep.temperature == 0.2
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+
+
 def test_encode_chat_direct_injects_system(monkeypatch):
     from slotbank.prompt import encode_chat
 
