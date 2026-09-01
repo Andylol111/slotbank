@@ -6,6 +6,7 @@ import pytest
 
 from slotbank.tps import (
     ADOPTED,
+    DEFERRED,
     IN_TREE,
     M4_AIR_24G,
     REJECTED,
@@ -59,7 +60,12 @@ def test_catalog_sound():
     assert get("ttft-is-prefill").status == ADOPTED
     assert get("skip-lm-head-prefill").status == ADOPTED
     assert get("spec-prefill-sparse").status == REJECTED
-    assert get("async-prefill-pipeline").status != ADOPTED
+    assert get("async-prefill-pipeline").status == ADOPTED
+    assert get("async-prefill-pipeline").needs_trim_cache is False
+    assert get("gdn-chunked-cuda-prefill").status == REJECTED
+    assert get("distserve-pd").status == REJECTED
+    assert get("vllm-gdn-block-apc").status == DEFERRED
+    assert get("gdn-cache-contiguous").status == DEFERRED
     assert get("warm-prefix-at-load").status != ADOPTED
     assert len(STRATEGIES) >= 10
 
@@ -250,3 +256,53 @@ def test_draft_report_empty_without_drafter():
     kind, block, rate = rt.draft_report()
     assert kind == "mtp" and block == 3
     assert rate == pytest.approx(5 / 6)
+
+
+def test_realize_prefill_prefers_async_until_wait():
+    from slotbank.runtime import _realize_prefill
+
+    class Mx:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def eval(self, states):
+            self.calls.append("eval")
+
+        def async_eval(self, states):
+            self.calls.append("async")
+
+    mx = Mx()
+    _realize_prefill(mx, ["st"], wait=False)
+    assert mx.calls == ["async"]
+    mx.calls.clear()
+    _realize_prefill(mx, ["st"], wait=True)
+    assert mx.calls == ["eval"]
+    mx.calls.clear()
+    _realize_prefill(mx, None, wait=False)
+    assert mx.calls == []
+
+    class OldMx:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def eval(self, states):
+            self.calls.append("eval")
+
+    old = OldMx()
+    _realize_prefill(old, ["st"], wait=False)
+    assert old.calls == ["eval"]
+
+
+def test_prefill_ids_pipelines_tiles():
+    import inspect
+
+    from slotbank.runtime import Runtime
+
+    src = inspect.getsource(Runtime._prefill_ids)
+    assert "_realize_prefill" in src
+    assert "_cut_prefill_tile" in src
+    assert src.count("clear_cache") == 1
+    loop = src[src.index("while offset") : src.index("if prev is not None")]
+    assert "clear_cache" not in loop
+    assert "wait=False" in src
+    assert "wait=True" in src

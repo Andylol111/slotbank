@@ -103,11 +103,17 @@ STRATEGIES: tuple[Strategy, ...] = (
     Strategy(
         "ttft-is-prefill",
         ADOPTED,
-        "Time-to-first-token is prompt prefill, not MTP. ~48 tok/s prefill on this Air.",
+        "Time-to-first-token is hybrid GDN prefill, not MTP. ~48 tok/s on this Air.",
         "819-token cold 17.0 s (48 tok/s). Same prefix reused 0.88 s (19×). "
-        "The first generated token still needs that prefill plus one 27B forward. "
-        "MTP K=3 raises decode tok/s; it does not shrink TTFT. Shrink N "
-        "(envelope / condense / PrefixCache) or skip work inside each tile.",
+        "Qwen3.8-27B is 48 Gated DeltaNet + 16 full-attn. Prefill should beat "
+        "decode (~5.7 tok/s greedy) because one weight read covers T tokens; "
+        "48 tok/s is only ~8× decode, far below fused-GDN machines (vMLX ~10k "
+        "tok in 14 s cold on an M3 Ultra 397B; mlx-swift GDN pipeline thousands "
+        "tok/s on M5 Max 35B-A3B). MTP K=3 raises decode tok/s; it does not "
+        "shrink TTFT. Three levers: shrink N (envelope), stop stalling Metal "
+        "between tiles (async-prefill-pipeline), kernels (gdn-chunked-cuda-prefill "
+        "does not transfer to Metal). Pin (~30 s) is first-request after boot, "
+        "not prefill.",
     ),
     Strategy(
         "skip-lm-head-prefill",
@@ -122,19 +128,75 @@ STRATEGIES: tuple[Strategy, ...] = (
     Strategy(
         "spec-prefill-sparse",
         REJECTED,
-        "SpecPrefill / GemFilter: prefill only 'important' prompt tokens.",
-        "The 27B would not see the full packed prompt. Same class as "
-        "pflash-drop-prompt. A 4B importance scorer is also "
-        "qwen35-4b-as-27b-drafter. Papers quote 2–5× TTFT on CUDA MoE.",
+        "SpecPrefill / GemFilter / SwiftKV: skip prompt tokens or layers.",
+        "Train-free token dropping and distilled skip-layers quote 2–7× TTFT "
+        "on CUDA. The 27B would not see the packed prompt, or its weights "
+        "would change. Same class as pflash-drop-prompt. A 4B importance "
+        "scorer is qwen35-4b-as-27b-drafter. User forbids changing 27B "
+        "tokens/verify.",
     ),
     Strategy(
         "async-prefill-pipeline",
+        ADOPTED,
+        "async_eval tile N while building N+1; one mx.eval + clear_cache at the end.",
+        "mlx-vlm #945 (open): per-chunk mx.eval+clear_cache is the server vs "
+        "vMLX TTFT gap on the same Mac (vMLX 10k tok 14 s cold / 0.24 s warm). "
+        "LM Studio 1.5× from chunk 512→8192. mlx-swift-lm #225: asyncEval per "
+        "chunk, one terminal eval — Qwen3.6-35B-A3B-4bit M5 Max 512 tok "
+        "235→2201 tok/s (9.4×), 2k 270→3937 (14.6×); M2 Mini 16 GB only "
+        "1.15–1.3× (GPU already saturated). This Air is M4 24 GB / 10 GPU "
+        "cores — expect Mini-class if compute-bound, #945-class if the "
+        "eval+clear stall dominated. PrefixCache copies still block that tile "
+        "(GDN cannot trim). Does not change 27B tokens. Unmeasured on the Air.",
+    ),
+    Strategy(
+        "gdn-chunked-cuda-prefill",
+        REJECTED,
+        "Port mlx-vlm #1423 chunked GDN (8.5× CUDA TTFT) into slotbank.",
+        "On CUDA, T>1 GDN was Python for t in range(T) (~49k graph nodes at "
+        "2048 tok). gated_delta_chunked (parallel intra-chunk matmul + "
+        "triangular solve + inter-chunk scan) took Qwen3.5-4B bf16 2048 tok "
+        "from 2090→247 ms on RTX PRO 6000. PR text: macOS/Metal unchanged — "
+        "Metal already runs gated_delta_kernel with the T-loop inside the "
+        "shader when Dk%32==0. After the CUDA fix mlx was still 2.4–4.2× "
+        "behind vLLM/SGLang on FlashAttention/fused GDN, not algorithm. "
+        "README already forbids the T>1 chunked scan for MTP verify (~4% "
+        "argmax flips vs T=1). Prefill of the prompt should use the model's "
+        "stock T>1 Metal kernel, not a second GDN we maintain. Not a 27B "
+        "TTFT lever we can ship in this repo.",
+    ),
+    Strategy(
+        "vllm-gdn-block-apc",
         DEFERRED,
-        "mx.async_eval tile N while building tile N+1 (Gemma 3 mlx-swift).",
-        "Our tiles mx.eval then mx.clear_cache, fully serial. Gemma's 128-token "
-        "default won over 1024 by overlapping graph build. 27B 4-bit on 24 GB "
-        "chose large pyramid tiles to cap peak and cut launches. Measure on the "
-        "Air before shrinking tiles; clear_cache-every-tile may erase the overlap.",
+        "vLLM mamba_cache_mode=all: checkpoint GDN SSM at every block 64.",
+        "vLLM #36649 / #54637 expose intermediate h from the CUDA/Triton "
+        "chunk_gated_delta_rule so APC can restore mid-prefix without "
+        "recompute. Hybrid MTP+APC has been a year of correctness bugs "
+        "(tool-call leak, needle miss, hit-rate collapse) and still costs "
+        "warm TTFT when rollback crosses a block. Metal gated_delta_kernel "
+        "does not return per-block states. Our PrefixCache is the analogue: "
+        "stop-and-copy at 128 (short) / 2048 (packed sink). Cannot copy "
+        "SGLang Radix page_size>1 (sgl-project/sglang#12867 still struggles "
+        "storing GDN at branches). Do not page hybrid KV.",
+    ),
+    Strategy(
+        "distserve-pd",
+        REJECTED,
+        "Prefill/decode disaggregation (DistServe, vLLM P/D).",
+        "Cluster technique: extra hop often helps ITL and hurts TTFT. One "
+        "Metal worker; MLX arrays cannot cross threads (async-metal-queues). "
+        "No second machine on this Air.",
+    ),
+    Strategy(
+        "gdn-cache-contiguous",
+        DEFERRED,
+        "mx.contiguous on GDN conv/state slices so multi-chunk prefill does not leak.",
+        "mlx-lm #1077: cache slices aliased parent graphs (~540 KB/tok), "
+        "24k ctx OOM on 128 GB. mlx-vlm Qwen3.5 already contiguous's conv "
+        "state; cache[1] (GDN state) is still a kernel output. Envelope is "
+        "8k on 24 GB (~4.4 GiB if the leak is live). Do not reimplement "
+        "GatedDeltaNet here; confirm the Air's mlx-vlm includes the conv "
+        "contiguous and whether long OMP prefills still grow RSS.",
     ),
     Strategy(
         "warm-prefix-at-load",
@@ -442,10 +504,13 @@ STRATEGIES: tuple[Strategy, ...] = (
         "turn re-encoded the chat (not an append of _fed_ids) and paid a cold 10k prefill. "
         "_iter_draft now restores the longest exact snapshot into a new cache, pyramid-tiles "
         "the gap, and leaves mlx-vlm generate_step the last token + rollback. Live append "
-        "still wins when the client is append-only. SLOTBANK_PREFIX_CACHE_MIB defaults to "
-        "384 so a 2048-token head fits (~278 MiB attn KV + GDN), not a 10k envelope copy "
-        "(~790 MiB) that jetsams 24 GB. put() refuses snaps past PrefixCache.MAX_SNAP=2048. "
-        "Does not page hybrid KV.",
+        "still wins when the client is append-only. Snap stops are 128 on short prompts "
+        "(generation-prompt token is not a prefix of the next OMP encode) and 2048 on "
+        "long ones (packed sink). 256/512/1024 crumbs used to split the first 2k of an "
+        "8k envelope into extra 27B forwards on the TTFT path; eviction already dropped "
+        "them first. SLOTBANK_PREFIX_CACHE_MIB defaults to 384 so a 2048-token head fits "
+        "(~278 MiB attn KV + GDN), not a 10k envelope copy (~790 MiB) that jetsams 24 GB. "
+        "put() refuses snaps past PrefixCache.MAX_SNAP=2048. Does not page hybrid KV.",
     ),
 )
 
@@ -529,6 +594,10 @@ def catalog_sound() -> None:
             raise ValueError(f"{s.id}: bad status {s.status}")
     if get("sidecar-mtp-k3").status != ADOPTED:
         raise ValueError("daily MTP must stay adopted until a cooler A/B beats it")
+    if get("async-prefill-pipeline").status != ADOPTED:
+        raise ValueError("prefill pipeline must stay adopted; per-tile eval+clear is the TTFT stall")
+    if get("gdn-chunked-cuda-prefill").status == ADOPTED:
+        raise ValueError("CUDA chunked GDN is not a Metal 27B lever")
     if daily_draft() != "sidecar-mtp-k3":
         raise ValueError("daily_draft mismatch")
     banned_adopted = {
@@ -548,6 +617,8 @@ def catalog_sound() -> None:
         "harness-structure-for-tps",
         "qwen35-4b-as-27b-drafter",
         "spec-prefill-sparse",
+        "gdn-chunked-cuda-prefill",
+        "distserve-pd",
     }
     for sid in banned_adopted:
         if get(sid).status == ADOPTED:

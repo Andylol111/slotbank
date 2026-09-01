@@ -378,6 +378,41 @@ def _pyramid_step(step: int, offset: int, prefix_n: int) -> int:
     return best
 
 
+def _cut_prefill_tile(step: int, offset: int, end: int, snaps: set[int]) -> int:
+    """Next exclusive end for one prefill forward.
+
+    Take the soonest PrefixCache stop inside the pyramid tile so hybrid GDN
+    (no trim) can restore an exact prefix. Callers that pass a single 2048
+    stop keep the first 2k as one 27B forward instead of 512+512+1024.
+    """
+    chunk_end = min(offset + _pyramid_step(step, offset, end), end)
+    for sp in sorted(snaps):
+        if offset < sp < chunk_end:
+            return sp
+    return chunk_end
+
+
+def _realize_prefill(mx, states, *, wait: bool) -> None:
+    """Keep Metal running across tiles.
+
+    mlx-vlm #945: mx.eval + mx.clear_cache after every chunk is why the
+    server prefills slower than vMLX on the same Mac (10k tok ~14 s cold
+    vs much longer with per-chunk barriers). mlx-swift-lm #225: asyncEval
+    of cache per chunk and one terminal eval, 9–14× on GDN models on an
+    M5 Max; ~1.15–1.3× on an M2 Mini 16 GB where the GPU already saturates.
+    Python mlx-lm defers eval until a value is read; we used to eval+clear
+    every tile, so we did not get that deferral.
+    """
+    if states is None:
+        return
+    if not wait:
+        async_eval = getattr(mx, "async_eval", None)
+        if async_eval is not None:
+            async_eval(states)
+            return
+    mx.eval(states)
+
+
 def _tune_metal() -> None:
     """Cap the allocator cache so freed activations do not sit at peak.
 
@@ -1039,35 +1074,45 @@ class Runtime:
         stream = _generation_stream()
         fwd = self._prefill_model()
         offset = start
+        prev = None
         while offset < end:
             if self._cancelled:
                 raise Cancelled()
-            step = _pyramid_step(self._prefill_step_size, offset, end)
-            chunk_end = min(offset + step, end)
-            for sp in snaps:
-                if offset < sp < chunk_end:
-                    chunk_end = sp
-                    break
+            chunk_end = _cut_prefill_tile(
+                self._prefill_step_size, offset, end, snaps
+            )
+            snap_at = chunk_end in snaps
             with mx.stream(stream):
                 chunk = prompt[offset:chunk_end][None]
                 prefill_forward(fwd, chunk, cache)
                 states = _cache_states(cache)
-                if states is not None:
-                    mx.eval(states)
+                if snap_at:
+                    # put() copies arrays the next tile mutates in place.
+                    if prev is not None:
+                        mx.eval(prev)
+                        prev = None
+                    _realize_prefill(mx, states, wait=True)
+                else:
+                    _realize_prefill(mx, states, wait=False)
+                    if prev is not None:
+                        mx.eval(prev)
+                    prev = states
             if commit_fed:
                 self._fed_ids.extend(ids[offset:chunk_end])
-            mx.clear_cache()
             offset = chunk_end
-            if self._prefix is not None and offset in snaps:
+            if self._prefix is not None and snap_at:
                 try:
                     self._prefix.put(ids[:offset], cache)
                 except (ValueError, TypeError, RuntimeError):
                     pass
+        if prev is not None:
+            mx.eval(prev)
         if self._prefix is not None and end >= PrefixCache.MIN_PREFIX:
             try:
                 self._prefix.put(ids[:end], cache)
             except (ValueError, TypeError, RuntimeError):
                 pass
+        mx.clear_cache()
 
     def _quantize_kv(self) -> None:
         """Convert the KV cache to `SLOTBANK_KV_BITS` once it passes the start.
@@ -1088,27 +1133,31 @@ class Runtime:
         )
 
     def _snap_points(self, start: int, prefix_n: int, ids: list[int] | None = None) -> set:
-        """Geometric heads to stop prefill on so the state can be restored.
+        """Stops where PrefixCache can restore. Hybrid GDN cannot trim.
 
-        Hybrid GDN cannot trim, so a reusable prefix must land exactly where
-        prefill stopped. Packed OMP turns share the 25% sink head (~2048
-        tokens at the 8k envelope). Short follow-ups share only the system
-        head; 128/256 sit inside that when the full prefix_n includes a
-        generation-prompt token the next turn does not start with. Keep the
-        largest few boundaries; put() stores prefix_n only when it is
-        <= MAX_SNAP (2048) so 8k copies do not jetsam 24 GB.
+        vLLM APC for GDN (`mamba_cache_mode=all`) checkpoints SSM inside the
+        kernel at block 64. We cannot: each extra stop is another full 27B
+        forward of the 15 GiB pack on the first-token path. Geometric
+        256/512/1024 cuts used to slice the first 2k of an 8k envelope into
+        three launches; PrefixCache already evicts those crumbs first.
+
+        Keep 128 on short prompts so an OMP follow-up that drops the
+        generation-prompt token still hits the system head. Keep MAX_SNAP
+        (2048) on long prompts so the packed sink is restorable. put()
+        still stores prefix_n when it is <= MAX_SNAP.
         """
         if self._prefix is None:
             return set()
         src = ids if ids is not None else self._prompt_ids
         pts: list[int] = []
-        n = 128
-        while n < prefix_n and n <= PrefixCache.MAX_SNAP:
-            if n > start:
-                pts.append(n)
-            n *= 2
-        pts = [p for p in pts if not self._prefix.has(src[:p])]
-        return set(pts[-3:])
+        if prefix_n <= PrefixCache.MAX_SNAP:
+            if start < 128 < prefix_n:
+                pts.append(128)
+        elif start < PrefixCache.MAX_SNAP < prefix_n:
+            pts.append(PrefixCache.MAX_SNAP)
+        if not src:
+            return set(pts)
+        return {p for p in pts if not self._prefix.has(src[:p])}
 
     def _lookahead(self) -> int:
         import os
