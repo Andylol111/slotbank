@@ -154,6 +154,17 @@ def test_keep_token_ids_is_sink_pyramid_tail():
     assert keep_token_ids([], 8) == []
 
 
+def test_keep_token_ids_head_lands_on_prefix_snap():
+    """Envelope cap 10240 → 20% head 2048, a PrefixCache geometric snap."""
+    from slotbank.prompt import keep_token_ids
+
+    ids = list(range(20000))
+    got = keep_token_ids(ids, 10240)
+    assert len(got) == 10240
+    assert got[:2048] == ids[:2048]
+    assert got[-1] == 19999
+
+
 def test_condense_keeps_ask_and_cites_the_dump():
     """Local stage: OMP may send the full harness; 27B gets the ask + citations."""
     from slotbank.prompt import condense_harness_messages
