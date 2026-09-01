@@ -197,9 +197,9 @@ STRATEGIES: tuple[Strategy, ...] = (
         "Pyramid/BUZZ/TriAttention analogue on prompt ids + prefill tiles.",
         "Does not evict or recode hybrid KV. keep_token_ids (SLOTBANK_PROMPT_PACK=1) "
         "keeps a sink prefix, a dense-early middle, and the tail. _pyramid_step "
-        "sizes chunk×(offset+chunk) so early Metal tiles stay large. Daily "
-        "--draft still uses conservative _adaptive_step because mlx-vlm takes "
-        "one chunk size. Default pack is off: overlong OMP dumps still 400.",
+        "sizes chunk×(offset+chunk) so early Metal tiles stay large. "
+        "One-shot CLI still 400s overlong dumps. Serve envelope packs leftovers "
+        "after condense, not as the first cut.",
     ),
     Strategy(
         "two-stage-harness",
@@ -209,7 +209,7 @@ STRATEGIES: tuple[Strategy, ...] = (
         "24 GB. SLOTBANK_CONDENSE / serve --condense keeps the last ask and "
         "file citations, logs the raw user blob when CONTEXT_DIR is set. "
         "upsert does not invent Anthropic/OpenAI keys; it keeps sibling "
-        "providers. Pack is the lossy fallback, not this door.",
+        "providers. Serve envelope is the daily local door (omp-serve-envelope).",
     ),
     Strategy(
         "hybrid-kv-dynamic-page",
@@ -285,6 +285,17 @@ STRATEGIES: tuple[Strategy, ...] = (
         "Accept rate (hence tok/s) is lower than the greedy 13.47 bench. Do not force "
         "temp 0 to chase the bench number — the harness uses 1 for thinking.",
         extra_drafter=True,
+    ),
+    Strategy(
+        "omp-serve-envelope",
+        ADOPTED,
+        "Serve absorbs OMP's harness: condense, slim tools, pack leftovers, prefix cache.",
+        "OMP still failed on 400/jetsam when the client sent 26k–39k tokens. "
+        "slotbank serve now defaults SLOTBANK_ENVELOPE=1. Condense keeps ask + "
+        "citations; slim_tools drops JSON schemas (the catalog alone is >16k); "
+        "keep_token_ids packs any leftover to 10240. Prefix cache reuses the "
+        "stable system head so later turns skip that prefill. Does not page "
+        "hybrid KV and does not change 27B weights. --no-envelope restores 400.",
     ),
     Strategy(
         "qwen35-4b-as-27b-drafter",

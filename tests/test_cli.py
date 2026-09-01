@@ -177,6 +177,7 @@ def test_encode_chat_condenses_when_asked(monkeypatch):
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
     monkeypatch.setenv("SLOTBANK_CONDENSE", "1")
     monkeypatch.setenv("SLOTBANK_CONDENSE_BUDGET", "200")
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "0")
@@ -204,6 +205,7 @@ def test_encode_chat_packs_overlong_when_asked(monkeypatch):
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
     monkeypatch.setenv("SLOTBANK_PROMPT_PACK", "1")
 
@@ -227,6 +229,7 @@ def test_encode_chat_refuses_overlong_prompt(monkeypatch):
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
     monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
 
     class Tok:
@@ -238,7 +241,7 @@ def test_encode_chat_refuses_overlong_prompt(monkeypatch):
 
     with pytest.raises(ValueError, match="prompt is 32 tokens \\(cap 8\\)"):
         encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
-    with pytest.raises(ValueError, match="omp --no-tools"):
+    with pytest.raises(ValueError, match="SLOTBANK_ENVELOPE"):
         encode_text(Tok(), "hi")
 
 
@@ -267,6 +270,7 @@ def test_encode_chat_default_cap_is_8k(monkeypatch):
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_MAX_PROMPT", raising=False)
     monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
 
     class Tok:
         def __init__(self, n):
@@ -295,6 +299,7 @@ def test_encode_chat_caps_plain_fallback(monkeypatch):
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "4")
 
     class Tok:
@@ -306,6 +311,121 @@ def test_encode_chat_caps_plain_fallback(monkeypatch):
 
     with pytest.raises(ValueError, match="prompt is 10 tokens"):
         encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+
+
+def test_slim_tools_drops_schemas():
+    from slotbank.prompt import slim_tools
+
+    fat = [{
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from disk.\nMore text.",
+            "parameters": {
+                "type": "object",
+                "properties": {f"p{i}": {"type": "string"} for i in range(200)},
+            },
+        },
+    }]
+    got = slim_tools(fat, budget=64)
+    assert got is not None
+    assert got[0]["function"]["name"] == "read_file"
+    assert "Read a file from disk." in got[0]["function"]["description"]
+    assert got[0]["function"]["parameters"] == {"type": "object", "properties": {}}
+    assert slim_tools(None) is None
+    assert slim_tools([]) is None
+
+
+def test_encode_chat_envelope_fits_omp_dump(monkeypatch):
+    """Serve envelope: a 26k-style OMP dump tokenizes instead of 400."""
+    import json
+
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "64")
+    monkeypatch.setenv("SLOTBANK_CONDENSE_BUDGET", "200")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            text = "\n".join(str(m.get("content") or "") for m in msgs)
+            tools = k.get("tools") or []
+            blob = json.dumps(tools)
+            assert "p199" not in blob, "tool schemas must be slimmed"
+            return [ord(c) % 97 for c in (text + blob)[:48]]
+
+        def encode(self, text):
+            return [1]
+
+    dump = "file:src/foo.py:1-80\n" + ("LINE\n" * 4000) + "\n\nhi"
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {f"p{i}": {"type": "string"} for i in range(200)},
+            },
+        },
+    }]
+    ids = encode_chat(
+        Tok(),
+        [
+            {"role": "system", "content": "You are OMP. " + ("tools " * 2000)},
+            {"role": "user", "content": dump},
+        ],
+        tools,
+    )
+    assert 0 < len(ids) <= 64
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+
+
+def test_encode_chat_envelope_packs_leftover_template(monkeypatch):
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            return list(range(32))
+
+        def encode(self, text):
+            return list(range(32))
+
+    got = encode_chat(Tok(), [{"role": "user", "content": "hi"}], None)
+    assert len(got) == 8
+    assert got[0] == 0 and got[-1] == 31
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+
+
+def test_enable_serve_envelope_defaults(tmp_path, monkeypatch):
+    import argparse
+    import os
+    from types import SimpleNamespace
+
+    from slotbank.cli import _enable_serve_envelope
+    from slotbank.prompt import DEFAULT_ENVELOPE_MAX_PROMPT, max_prompt_tokens
+
+    monkeypatch.setenv("SLOTBANK_CONTEXT_DIR", str(tmp_path))
+    for k in (
+        "SLOTBANK_ENVELOPE", "SLOTBANK_CONDENSE", "SLOTBANK_PROMPT_PACK",
+        "SLOTBANK_PREFIX_CACHE", "SLOTBANK_MAX_PROMPT",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    _enable_serve_envelope(SimpleNamespace(no_envelope=False))
+    assert os.environ["SLOTBANK_ENVELOPE"] == "1"
+    assert os.environ["SLOTBANK_CONDENSE"] == "1"
+    assert os.environ["SLOTBANK_PROMPT_PACK"] == "1"
+    assert os.environ["SLOTBANK_PREFIX_CACHE"] == "1"
+    assert max_prompt_tokens() == DEFAULT_ENVELOPE_MAX_PROMPT
+    _enable_serve_envelope(argparse.Namespace(no_envelope=True))
+    assert os.environ["SLOTBANK_ENVELOPE"] == "0"
 
 
 def test_resolve_passes_through_explicit_ids(tmp_path):

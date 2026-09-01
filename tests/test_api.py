@@ -246,6 +246,9 @@ def test_overlong_prompt_is_http_400(monkeypatch):
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
     monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "8")
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+    monkeypatch.delenv("SLOTBANK_PROMPT_PACK", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
 
     class FatEngine(FakeEngine):
         def tokenize_chat(self, messages, tools):
@@ -276,7 +279,7 @@ def test_overlong_prompt_is_http_400(monkeypatch):
     )
     assert claude.status_code == 400
     assert "32 tokens" in claude.json()["error"]["message"]
-    assert "omp --no-tools" in claude.json()["error"]["message"]
+    assert "SLOTBANK_ENVELOPE" in claude.json()["error"]["message"]
 
     openai = c.post(
         "/v1/chat/completions",
@@ -293,6 +296,58 @@ def test_overlong_prompt_is_http_400(monkeypatch):
     )
     assert raw.status_code == 400
     assert "32 tokens" in raw.json()["error"]["message"]
+
+
+def test_openai_envelope_answers_omp_sized_prompt(monkeypatch):
+    """With the serve envelope, a fat OMP hi is 200, not 400."""
+    from fastapi.testclient import TestClient
+
+    from slotbank.api.app import create_app
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "64")
+    monkeypatch.setenv("SLOTBANK_CONDENSE_BUDGET", "200")
+
+    class EnvelopeEngine(FakeEngine):
+        def tokenize_chat(self, messages, tools):
+            class Tok:
+                def apply_chat_template(self, msgs, **k):
+                    text = "\n".join(str(m.get("content") or "") for m in msgs)
+                    return [ord(c) % 97 for c in text[:40]]
+
+                def encode(self, text):
+                    return [1, 2]
+
+            return encode_chat(Tok(), messages, tools)
+
+    dump = "file:src/foo.py:1-2\n" + ("LINE\n" * 3000) + "\n\nhi"
+    r = TestClient(create_app(EnvelopeEngine(), api_key="k")).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer k"},
+        json={
+            "model": "toy",
+            "messages": [
+                {"role": "system", "content": "You are OMP. " + ("tools " * 1500)},
+                {"role": "user", "content": dump},
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {f"p{i}": {"type": "string"} for i in range(80)},
+                    },
+                },
+            }],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "hi"
 
 
 def test_claude_count_tokens():
