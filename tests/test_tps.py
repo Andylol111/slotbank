@@ -68,6 +68,8 @@ def test_catalog_sound():
     assert get("gdn-cache-contiguous").status == DEFERRED
     assert get("qwen-chat-prefix-stable").status == ADOPTED
     assert get("qwen-chat-prefix-stable").needs_trim_cache is False
+    assert get("omp-reencode-prefix").status == ADOPTED
+    assert get("omp-reencode-prefix").needs_trim_cache is False
     assert get("metal-qmm-prefill").status == DEFERRED
     assert get("ane-npu-prefill").status == REJECTED
     assert get("warm-prefix-at-load").status != ADOPTED

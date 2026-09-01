@@ -613,6 +613,21 @@ class PrefixCache:
                     c.meta_state = meta
                 except (ValueError, TypeError):
                     pass
+            # KVCache.state.setter sets offset from keys.shape[2]. A
+            # setter that only writes keys/values leaves offset at 0
+            # (mlx-lm#1162 class): the suffix would append onto an
+            # empty-looking cache. Skip RotatingKVCache (_idx + meta).
+            if getattr(c, "offset", None) is None or hasattr(c, "_idx"):
+                continue
+            keys = st[0] if isinstance(st, (tuple, list)) and st else None
+            if keys is None or not hasattr(keys, "shape"):
+                continue
+            try:
+                n = int(keys.shape[2])
+            except (TypeError, IndexError, AttributeError):
+                continue
+            if int(c.offset) != n:
+                c.offset = n
 
 
 def propose_from_context(ids: list[int], k: int, ngram: int = 3) -> list[int]:
@@ -1148,12 +1163,12 @@ class Runtime:
         256/512/1024 cuts used to slice the first 2k of an 8k envelope into
         three launches; PrefixCache already evicts those crumbs first.
 
-        Keep the Qwen generation-prompt boundary on short prompts
-        (PromptIds.stable_prefix_n). A hardcoded 128 used to split every
-        short hi into two 27B forwards; the follow-up hit is the end of
-        the last user turn, before `<|im_start|>assistant` + think tags.
-        Keep MAX_SNAP (2048) on long prompts so the packed sink is
-        restorable. put() still stores prefix_n when it is <= MAX_SNAP.
+        Keep PromptIds.stable_prefix_n on short prompts. That stop is the
+        pre-/no_think body, not add_generation_prompt and not a hardcoded
+        128 (two 27B forwards on every short hi). Follow-ups hit there
+        only if history condenses the same way. Keep MAX_SNAP (2048) on
+        long prompts so the packed sink is restorable. put() still stores
+        prefix_n when it is <= MAX_SNAP.
         """
         if self._prefix is None:
             return set()

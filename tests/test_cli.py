@@ -57,7 +57,7 @@ def test_encode_chat_thinking_defaults_off(monkeypatch):
 
 
 def test_encode_chat_marks_generation_prompt_boundary(monkeypatch):
-    """Qwen add_generation_prompt is not a prefix of the next turn (Qwen3#1826)."""
+    """Generation prompt is not a prefix of the next turn (Qwen3#1826)."""
     from slotbank.prompt import encode_chat
 
     monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
@@ -91,8 +91,9 @@ def test_encode_chat_envelope_injects_no_think(monkeypatch):
 
     class Tok:
         def apply_chat_template(self, msgs, **k):
-            got["msgs"] = msgs
-            got["kwargs"] = k
+            if k.get("add_generation_prompt"):
+                got["msgs"] = msgs
+                got["kwargs"] = k
             return [1]
 
         def encode(self, text):
@@ -256,6 +257,86 @@ def test_keep_token_ids_head_lands_on_prefix_snap():
     assert got[-1] == 19999
     fat = keep_token_ids(ids, 10240)
     assert fat[:2048] == ids[:2048]
+
+
+def test_condense_history_matches_last_ask_dump():
+    """Follow-up must not tail-clip the dump that turn 1 stored as citations+ask."""
+    from slotbank.prompt import condense_harness_messages
+
+    dump = "file:src/foo.py:1-80\n" + ("LINE\n" * 4000) + "\n\nhi"
+    sys_m = {"role": "system", "content": "You are OMP."}
+    first = condense_harness_messages(
+        [sys_m, {"role": "user", "content": dump}], budget=400,
+    )
+    follow = condense_harness_messages(
+        [
+            sys_m,
+            {"role": "user", "content": dump},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "again"},
+        ],
+        budget=400,
+    )
+    assert first[1]["content"] == follow[1]["content"]
+    assert "hi" in first[1]["content"]
+    assert first[1]["content"].count("LINE") < 40
+    mid = "note " * 80
+    first_mid = condense_harness_messages(
+        [sys_m, {"role": "user", "content": mid}], budget=400,
+    )
+    follow_mid = condense_harness_messages(
+        [
+            sys_m,
+            {"role": "user", "content": mid},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "next"},
+        ],
+        budget=400,
+    )
+    assert first_mid[1]["content"] == follow_mid[1]["content"] == mid
+
+
+def test_encode_chat_followup_shares_pre_switch_prefix(monkeypatch):
+    """Envelope /no_think is last-ask only. Snap the body without it."""
+    from slotbank.prompt import encode_chat
+
+    monkeypatch.delenv("SLOTBANK_CONTEXT_DIR", raising=False)
+    monkeypatch.delenv("SLOTBANK_DIRECT", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONDENSE", raising=False)
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    monkeypatch.setenv("SLOTBANK_MAX_PROMPT", "0")
+
+    class Tok:
+        def apply_chat_template(self, msgs, **k):
+            ids = []
+            for m in msgs:
+                ids.append({"system": 1, "user": 2, "assistant": 3}[m["role"]])
+                ids.extend((ord(c) % 40) + 10 for c in str(m.get("content") or ""))
+                ids.append(9)
+            if k.get("add_generation_prompt"):
+                ids += [8, 7]
+            return ids
+
+        def encode(self, text):
+            return [0]
+
+    sys_m = {"role": "system", "content": "You are a local assistant on this machine."}
+    first = encode_chat(Tok(), [sys_m, {"role": "user", "content": "hi"}], None)
+    follow = encode_chat(
+        Tok(),
+        [
+            sys_m,
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "again"},
+        ],
+        None,
+    )
+    n = getattr(first, "stable_prefix_n", 0)
+    assert n >= 32
+    assert list(follow)[:n] == list(first)[:n]
+    assert n < len(first)
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
 
 
 def test_condense_keeps_ask_and_cites_the_dump():

@@ -100,6 +100,49 @@ def test_prefix_cache_evicts_shortest_first():
     assert kept == [80, 120]
 
 
+def test_prefix_cache_restore_repairs_kv_offset():
+    """A state setter that only writes keys leaves offset 0 (mlx-lm#1162)."""
+    from slotbank.runtime import PrefixCache
+
+    class Keys:
+        shape = (1, 4, 40, 16)
+
+    class Cell:
+        def __init__(self):
+            self.offset = 0
+            self._state = None
+
+        @property
+        def state(self):
+            return self._state
+
+        @state.setter
+        def state(self, v):
+            self._state = v
+
+    cell = Cell()
+    PrefixCache().restore([cell], [((Keys(), Keys()), None)])
+    assert cell.offset == 40
+
+    class Rotating:
+        def __init__(self):
+            self.offset = 7
+            self._idx = 7
+            self._state = None
+
+        @property
+        def state(self):
+            return self._state
+
+        @state.setter
+        def state(self, v):
+            self._state = v
+
+    rot = Rotating()
+    PrefixCache().restore([rot], [((Keys(), Keys()), None)])
+    assert rot.offset == 7
+
+
 def test_prefix_cache_put_skips_oversize_without_mlx():
     from slotbank.runtime import PrefixCache
 

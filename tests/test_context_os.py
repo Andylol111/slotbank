@@ -107,6 +107,8 @@ def test_prompt_injects_compiled_prefix(tmp_path, monkeypatch):
     from slotbank.prompt import with_context_os
 
     append(tmp_path, "user", "verbatim-span")
+    monkeypatch.delenv("SLOTBANK_ENVELOPE", raising=False)
+    monkeypatch.delenv("SLOTBANK_CONTEXT_INJECT", raising=False)
     monkeypatch.setenv("SLOTBANK_CONTEXT_DIR", str(tmp_path))
     msgs = with_context_os([{"role": "user", "content": "now"}])
     assert msgs[0]["role"] == "system"
@@ -115,6 +117,23 @@ def test_prompt_injects_compiled_prefix(tmp_path, monkeypatch):
     # Sidecar contract: same list is valid OpenAI chat JSON. No tokenizer, no MLX.
     payload = json.dumps({"messages": msgs, "temperature": 0})
     assert "verbatim-span" in payload and "now" in payload
+
+
+def test_envelope_does_not_inject_logged_dump(tmp_path, monkeypatch):
+    """Serve CONTEXT_DIR is a log. Compiling it back busts PrefixCache."""
+    from slotbank.context_os import append
+    from slotbank.prompt import with_context_os
+
+    append(tmp_path, "user", "verbatim-span")
+    monkeypatch.setenv("SLOTBANK_CONTEXT_DIR", str(tmp_path))
+    monkeypatch.setenv("SLOTBANK_ENVELOPE", "1")
+    monkeypatch.delenv("SLOTBANK_CONTEXT_INJECT", raising=False)
+    msgs = with_context_os([{"role": "user", "content": "now"}])
+    assert msgs == [{"role": "user", "content": "now"}]
+    monkeypatch.setenv("SLOTBANK_CONTEXT_INJECT", "1")
+    injected = with_context_os([{"role": "user", "content": "now"}])
+    assert injected[0]["role"] == "system"
+    assert "verbatim-span" in injected[0]["content"]
 
 
 def test_encode_chat_drops_thinking_kwarg(monkeypatch):

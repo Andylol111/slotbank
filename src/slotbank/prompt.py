@@ -184,7 +184,28 @@ def apply_qwen_sampling(sp, mode: str | None = None):
     )
 
 
+def _context_inject_on() -> bool:
+    """Whether to compile the session log back into the chat prefix.
+
+    Serve envelope sets CONTEXT_DIR so oversized OMP dumps can be logged.
+    Compiling that log into the system message changes every turn
+    (newest-first) and puts back the dump condense just removed — PrefixCache
+    then misses. Opt in with SLOTBANK_CONTEXT_INJECT=1. A CONTEXT_DIR the
+    user set themselves, without the envelope, still injects.
+    """
+    raw = os.environ.get("SLOTBANK_CONTEXT_INJECT", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if _envelope_on():
+        return False
+    return bool(os.environ.get("SLOTBANK_CONTEXT_DIR", "").strip())
+
+
 def with_context_os(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not _context_inject_on():
+        return messages
     prefix = compiled_system_message()
     if not prefix:
         return messages
@@ -297,6 +318,43 @@ def _last_ask(text: str, ask_n: int) -> tuple[str, str]:
     return text[: max(0, len(text) - len(ask))], ask
 
 
+def _is_cwd_dump(text: str) -> bool:
+    return bool(_FOOTER_CHILD.search(text)) and _approx_tok(text) > 256
+
+
+def _condense_user_blob(text: str, ask_n: int, cite_n: int) -> str:
+    """Deterministic dump → ask+cites. Same raw text must stay the same turn to turn.
+
+    PrefixCache is exact GDN. If user1 is citations+ask on turn 1 and a
+    sys_n tail-clip of the raw dump on turn 2, the follow-up misses and
+    pays the cold prefill again.
+    """
+    if _is_cwd_dump(text):
+        _, ask = _last_ask(text, ask_n)
+        child_cites: list[str] = []
+        seen: set[str] = set()
+        for hit in _FOOTER_CHILD.finditer(text):
+            key = f"cwd-child:{hit.group(1)}"
+            if key not in seen:
+                seen.add(key)
+                child_cites.append(f"[{key}]")
+        parts = ["[cwd nested git dump omitted]"]
+        if child_cites:
+            parts.append("Citations:\n" + "\n".join(child_cites[:8]))
+        parts.append((ask or "hi").lstrip())
+        return "\n\n".join(p for p in parts if p.strip())
+    head, ask = _last_ask(text, ask_n)
+    cites = _cites(head) or _cites(text)
+    dump_head = _clip_tok(head, min(24, cite_n // 4))
+    parts = []
+    if cites:
+        parts.append("Citations:\n" + "\n".join(cites))
+    if dump_head.strip():
+        parts.append(dump_head.rstrip())
+    parts.append(ask.lstrip())
+    return "\n\n".join(parts)
+
+
 def condense_harness_messages(
     messages: list[dict[str, Any]],
     *,
@@ -307,64 +365,46 @@ def condense_harness_messages(
     The harness prompt stays intact on the cloud subscription side. This only
     shapes what the Air prefills. Verbatim full text can still land on the
     context-OS disk log when SLOTBANK_CONTEXT_DIR is set.
+
+    User dumps use one recipe whether they are the last ask or history.
+    A follow-up that tail-clipped user1 used to miss PrefixCache.
     """
     budget = condense_budget() if budget is None else max(64, int(budget))
     sys_n = max(64, budget * 15 // 100)
     cite_n = max(64, budget * 25 // 100)
     ask_n = max(128, budget - sys_n - cite_n)
-    last_user = None
-    for i, m in enumerate(messages):
-        if (m.get("role") or "") == "user":
-            last_user = i
     out: list[dict[str, Any]] = []
-    for i, raw in enumerate(messages):
+    for raw in messages:
         m = dict(raw)
         role = m.get("role") or "user"
         text = _text_of(m.get("content"))
-        limit = ask_n if i == last_user else sys_n
-        if _approx_tok(text) <= limit:
-            out.append(m)
-            continue
         if role == "system":
-            m["content"] = _clip_tok(text, sys_n) + "\n\n[harness system truncated]"
-            out.append(m)
+            if _approx_tok(text) <= sys_n:
+                out.append(m)
+            else:
+                m["content"] = _clip_tok(text, sys_n) + "\n\n[harness system truncated]"
+                out.append(m)
             continue
         if role == "tool" or m.get("tool_call_id"):
-            cites = _cites(text)
-            m["content"] = "\n".join(cites) if cites else "[tool result omitted]"
-            out.append(m)
-            continue
-        if i == last_user:
-            if _FOOTER_CHILD.search(text) and _approx_tok(text) > 256:
-                _, ask = _last_ask(text, ask_n)
-                child_cites: list[str] = []
-                seen: set[str] = set()
-                for hit in _FOOTER_CHILD.finditer(text):
-                    key = f"cwd-child:{hit.group(1)}"
-                    if key not in seen:
-                        seen.add(key)
-                        child_cites.append(f"[{key}]")
-                parts = ["[cwd nested git dump omitted]"]
-                if child_cites:
-                    parts.append("Citations:\n" + "\n".join(child_cites[:8]))
-                parts.append((ask or "hi").lstrip())
-                m["content"] = "\n\n".join(p for p in parts if p.strip())
+            if _approx_tok(text) <= sys_n:
                 out.append(m)
-                continue
-            head, ask = _last_ask(text, ask_n)
-            cites = _cites(head) or _cites(text)
-            dump_head = _clip_tok(head, min(24, cite_n // 4))
-            parts = []
-            if cites:
-                parts.append("Citations:\n" + "\n".join(cites))
-            if dump_head.strip():
-                parts.append(dump_head.rstrip())
-            parts.append(ask.lstrip())
-            m["content"] = "\n\n".join(parts)
-            out.append(m)
+            else:
+                cites = _cites(text)
+                m["content"] = "\n".join(cites) if cites else "[tool result omitted]"
+                out.append(m)
             continue
-        m["content"] = _clip_tok(text, sys_n, tail=True)
-        out.append(m)
+        if role == "user":
+            if _approx_tok(text) <= ask_n and not _is_cwd_dump(text):
+                out.append(m)
+            else:
+                m["content"] = _condense_user_blob(text, ask_n, cite_n)
+                out.append(m)
+            continue
+        if _approx_tok(text) <= sys_n:
+            out.append(m)
+        else:
+            m["content"] = _clip_tok(text, sys_n, tail=True)
+            out.append(m)
     return out
 
 
@@ -536,13 +576,15 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
 
 
 class PromptIds(list):
-    """Chat token ids plus the Qwen generation-prompt boundary.
+    """Chat token ids plus the PrefixCache stop that survives the next OMP encode.
 
-    Historical assistant turns omit the generation-prompt think tags
-    (QwenLM/Qwen3#1826, lmstudio mlx-engine#176). PrefixCache can only
-    restore an exact GDN stop, so that boundary is the follow-up hit —
-    not prefix_n (which still includes the generation-prompt suffix) and
-    not a hardcoded 128.
+    Three things are not a prefix of the next turn:
+    - add_generation_prompt think tags (QwenLM/Qwen3#1826, mlx-engine#176)
+    - envelope /no_think on the last user (historical turns omit it)
+    - a last-user-only condense that rewrites user1 on the follow-up
+
+    stable_prefix_n is the common prefix of the full encode and the same
+    messages *without* the generation prompt and *without* /no_think.
     """
 
     stable_prefix_n: int = 0
@@ -570,6 +612,9 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
         msgs = condense_harness_messages(msgs)
     if _condense_on() or _envelope_on():
         tools = slim_tools(tools)
+    # /no_think is only on the last ask. The next OMP encode will omit it
+    # from this turn, so PrefixCache must snap the pre-switch body.
+    history = msgs
     msgs = with_qwen_mode(msgs)
     apply = getattr(tokenizer, "apply_chat_template", None)
 
@@ -582,23 +627,23 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
-        "enable_thinking": qwen_mode_of(msgs) == "think",
+        "enable_thinking": qwen_mode_of(history) == "think",
     }
     if tools:
         kwargs["tools"] = tools
 
-    def _apply(k: dict[str, Any]):
-        return apply(msgs, **k)
+    def _apply(m: list[dict[str, Any]], k: dict[str, Any]):
+        return apply(m, **k)
 
     try:
-        raw = _apply(kwargs)
+        raw = _apply(msgs, kwargs)
     except TypeError:
         kwargs.pop("tools", None)
         try:
-            raw = _apply(kwargs)
+            raw = _apply(msgs, kwargs)
         except TypeError:
             kwargs.pop("enable_thinking", None)
-            raw = _apply(kwargs)
+            raw = _apply(msgs, kwargs)
     except ValueError:
         # A base model ships the method but no template, and transformers
         # raises rather than returning None. Without this, every base
@@ -609,7 +654,7 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     try:
         body_kw = dict(kwargs)
         body_kw["add_generation_prompt"] = False
-        body = _token_ids(_apply(body_kw))
+        body = _token_ids(_apply(history, body_kw))
     except (TypeError, ValueError):
         body = None
     capped = enforce_prompt_cap(full)
