@@ -523,7 +523,8 @@ def _omp(args) -> int:
     print("        empty dir for hi — /tmp with a child git dumps that tree")
     print("        Qwen /no_think by default; put /think on the last ask to reason")
     print("        cloud subscription still keeps the full harness if you have one")
-    print("        wait for serve 'ready' before sending (~30s 27B load is normal)")
+    print("        wait for serve 'ready' (mmap; /models/load can return before the 15 GiB pin)")
+    print("        keep that serve process up — restarting it re-pays the pin")
     return 0
 
 
@@ -590,8 +591,9 @@ def _serve(args) -> int:
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
-            f"  first hi                   wait for 'ready' (~30s 27B load). "
-            f"Use {selector(mid)} not -agent. Empty dir, not /tmp with a child git. "
+            f"  first hi                   wait for 'ready' (graph mapped; picker can leave loading). "
+            f"Metal still pins ~15 GiB before the first token if you send immediately. "
+            f"Keep this process running. Use {selector(mid)} not -agent. Empty dir, not /tmp with a child git. "
             f"/no_think is default; /think on the last ask to reason."
         )
     proxy = EngineProxy(LoadingEngine(mid))

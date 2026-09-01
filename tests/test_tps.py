@@ -53,6 +53,8 @@ def test_catalog_sound():
     assert get("dais-reset-each-request").needs_trim_cache is False
     assert get("skip-vlm-rope-prime").status == ADOPTED
     assert get("skip-vlm-rope-prime").needs_trim_cache is False
+    assert get("omp-defer-weight-pin").status == ADOPTED
+    assert get("omp-defer-weight-pin").needs_trim_cache is False
     assert len(STRATEGIES) >= 10
 
 
@@ -165,6 +167,38 @@ def test_iter_draft_starts_at_cap_and_skips_dead_rope_prime():
     assert "_arm_draft_block" in src
     assert "mlx_vlm.generate.dispatch" not in src
     assert "_retune_draft_block" not in src
+
+
+def test_pin_is_idempotent_and_covers_draft(monkeypatch):
+    from types import SimpleNamespace
+
+    from slotbank import runtime
+    from slotbank.runtime import Runtime
+
+    seen: list = []
+
+    monkeypatch.setattr(runtime, "_is_dense", lambda um: True)
+    monkeypatch.setattr(runtime, "_pin_dense", lambda m: seen.append(m) or 1)
+
+    rt = Runtime(SimpleNamespace(model_path="x", prefill_step_size=512))
+    rt._model = object()
+    rt._draft = object()
+    rt.pin()
+    rt.pin()
+    assert seen == [rt._model, rt._draft]
+
+
+def test_engine_loop_ready_before_pin():
+    import inspect
+
+    from slotbank.engine import Engine
+
+    src = inspect.getsource(Engine._loop)
+    assert "pin=False" in src
+    mapped = src.index("self._ready.set()")
+    # skip the failure-path set inside the except
+    mapped = src.index("self._ready.set()", mapped + 1)
+    assert mapped < src.index("self.runtime.pin()")
 
 
 def test_draft_report_empty_without_drafter():

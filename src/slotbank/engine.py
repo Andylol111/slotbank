@@ -142,14 +142,24 @@ class Engine:
             if kind in {"result", "err"}:
                 return
 
+    @property
+    def load_error(self) -> str | None:
+        return self._load_error
+
     def _loop(self) -> None:
         try:
-            self.runtime.load(progress=self._progress)
+            # mmap + tokenizer + draft graph. Not the 15 GiB mx.eval.
+            # OMP /models/load waits on Engine.__init__ -> _ready.
+            self.runtime.load(progress=self._progress, pin=False)
         except Exception as exc:               # surface load failures to __init__
             self._load_error = f"{type(exc).__name__}: {exc}"
             self._ready.set()
             return
         self._ready.set()
+        try:
+            self.runtime.pin()
+        except Exception as exc:
+            self._load_error = f"{type(exc).__name__}: {exc}"
         while True:
             job = self._jobs.get()
             if job is None:
@@ -160,6 +170,9 @@ class Engine:
                 except Exception:
                     pass
                 return
+            if self._load_error is not None:
+                job.out.put(("err", self._load_error))
+                continue
             try:
                 self._run_job(job)
             except Exception as exc:
