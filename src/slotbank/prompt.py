@@ -39,10 +39,14 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _thinking_on() -> bool:
-    return os.environ.get("SLOTBANK_THINKING", "0").strip().lower() in {
+def _flag(name: str, default: str = "") -> bool:
+    return os.environ.get(name, default).strip().lower() in {
         "1", "true", "yes", "on",
     }
+
+
+def _thinking_on() -> bool:
+    return _flag("SLOTBANK_THINKING", "0")
 
 
 def _direct_on() -> bool:
@@ -113,9 +117,16 @@ def _approx_tok(text: str) -> int:
 
 
 def _condense_on() -> bool:
-    return os.environ.get("SLOTBANK_CONDENSE", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    return _flag("SLOTBANK_CONDENSE") or _envelope_on()
+
+
+def _envelope_on() -> bool:
+    """Serve's OMP runtime: condense + slim tools + pack leftovers.
+
+    Off unless SLOTBANK_ENVELOPE=1 (slotbank serve sets that). Without it,
+    overlong prompts still 400 so a one-shot CLI cannot jetsam the Air.
+    """
+    return _flag("SLOTBANK_ENVELOPE")
 
 
 def condense_budget() -> int:
@@ -126,9 +137,11 @@ def condense_budget() -> int:
         except ValueError:
             pass
     cap = max_prompt_tokens()
+    # Envelope keeps more of a real ask than the old 4k cloud-stage clip.
+    ceiling = 8192 if _envelope_on() else 4096
     if cap:
-        return min(4096, cap)
-    return 4096
+        return min(ceiling, cap)
+    return ceiling
 
 
 def _cites(text: str, limit: int = 24) -> list[str]:
@@ -256,15 +269,22 @@ def _maybe_log_raw_user(messages: list[dict[str, Any]]) -> None:
         return
 
 
-# 27B 4-bit on 24 GB cannot prefill ~15k tokens (OMP footer 45%/33K).
-# 16k accepted the dump and jetsammed mid-prefill (~60s Connection error).
+# 27B 4-bit on 24 GB cannot prefill a raw ~15k OMP dump (jetsam ~60s).
+# Envelope condenses first; this cap is the Metal pack target after that.
 # 0 disables.
 DEFAULT_MAX_PROMPT_TOKENS = 8192
+# Serve envelope: 10k tokens × 64 KiB attn KV ≈ 640 MiB. 12k+ was the
+# jetsam band when the *uncondensed* dump was prefills. After condense
+# the 27B rarely sees more than ~4k; this is headroom for a real file.
+DEFAULT_ENVELOPE_MAX_PROMPT = 10240
+TOOL_SLIM_BUDGET = 256
 
 
 def max_prompt_tokens() -> int:
     raw = os.environ.get("SLOTBANK_MAX_PROMPT", "").strip()
     if not raw:
+        if _envelope_on():
+            return DEFAULT_ENVELOPE_MAX_PROMPT
         return DEFAULT_MAX_PROMPT_TOKENS
     try:
         n = int(raw)
@@ -276,9 +296,7 @@ def max_prompt_tokens() -> int:
 
 
 def _prompt_pack_on() -> bool:
-    return os.environ.get("SLOTBANK_PROMPT_PACK", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    return _flag("SLOTBANK_PROMPT_PACK") or _envelope_on()
 
 
 def _pyramid_sample(src: list[int], k: int) -> list[int]:
@@ -333,11 +351,44 @@ def keep_token_ids(ids: list[int], cap: int) -> list[int]:
 
 
 def maybe_pack_prompt(ids: list[int]) -> list[int]:
-    """SLOTBANK_PROMPT_PACK=1: keep sink+pyramid+tail instead of HTTP 400."""
+    """Pack sink+pyramid+tail when over cap. Envelope does this instead of 400."""
     cap = max_prompt_tokens()
     if not cap or len(ids) <= cap or not _prompt_pack_on():
         return ids
     return keep_token_ids(ids, cap)
+
+
+def slim_tools(
+    tools: list[dict[str, Any]] | None,
+    *,
+    budget: int | None = None,
+) -> list[dict[str, Any]] | None:
+    """Keep tool names, drop JSON schemas. OMP's catalog alone is >16k tokens."""
+    if not tools:
+        return None
+    limit = TOOL_SLIM_BUDGET if budget is None else max(32, int(budget))
+    out: list[dict[str, Any]] = []
+    used = 0
+    for raw in tools:
+        fn = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+        if not isinstance(fn, dict):
+            continue
+        name = str(fn.get("name") or raw.get("name") or "tool").strip() or "tool"
+        desc = str(fn.get("description") or raw.get("description") or "")
+        desc = desc.strip().splitlines()[0][:120] if desc.strip() else ""
+        cost = _approx_tok(name + " " + desc) + 8
+        if out and used + cost > limit:
+            break
+        out.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })
+        used += cost
+    return out or None
 
 
 def enforce_prompt_cap(ids: list[int]) -> list[int]:
@@ -349,9 +400,9 @@ def enforce_prompt_cap(ids: list[int]) -> list[int]:
             "27B on 24 GB cannot prefill that. "
             "OMP footer `/tmp ↳ name` means a git repo that is a *child* of cwd "
             "was injected (e.g. /tmp/llama.cpp-dflash2). "
-            "mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools. "
-            "Override: SLOTBANK_MAX_PROMPT=0, SLOTBANK_CONDENSE=1 "
-            "(local two-stage), or SLOTBANK_PROMPT_PACK=1."
+            "slotbank serve envelopes OMP dumps (condense + slim tools + pack). "
+            "Override: SLOTBANK_MAX_PROMPT=0, SLOTBANK_ENVELOPE=1, "
+            "SLOTBANK_CONDENSE=1, or SLOTBANK_PROMPT_PACK=1."
         )
     return ids
 
@@ -361,6 +412,8 @@ def encode_chat(tokenizer, messages: list[dict[str, Any]], tools: list[dict] | N
     if _condense_on():
         _maybe_log_raw_user(messages)
         msgs = condense_harness_messages(msgs)
+    if _condense_on() or _envelope_on():
+        tools = slim_tools(tools)
     apply = getattr(tokenizer, "apply_chat_template", None)
 
     def plain() -> list[int]:

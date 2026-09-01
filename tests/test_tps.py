@@ -35,6 +35,8 @@ def test_catalog_sound():
     assert get("igpu-pyramid-tiles").status == IN_TREE
     assert get("igpu-pyramid-tiles").needs_trim_cache is False
     assert get("two-stage-harness").status == IN_TREE
+    assert get("omp-serve-envelope").status == ADOPTED
+    assert get("omp-serve-envelope").needs_trim_cache is False
     assert get("mtplx-engine").status != ADOPTED
     assert get("tree-medusa-eagle").status != ADOPTED
     assert get("harness-temp-1").status == ADOPTED

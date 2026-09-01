@@ -54,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="do not write ~/.omp/agent/models.yml",
     )
+    s.add_argument(
+        "--no-envelope",
+        action="store_true",
+        help="do not condense/pack OMP prompts (old 400-over-cap behavior)",
+    )
     _tuning_args(s)
 
     om = sub.add_parser(
@@ -256,7 +261,7 @@ def _tuning_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--direct", action="store_true",
                    help="inject a short no-lecture system prefix (does not change weights)")
     p.add_argument("--condense", action="store_true",
-                   help="local two-stage: condense OMP's harness blob before 27B")
+                   help="condense OMP's harness blob before 27B (implied by serve)")
     _draft_args(p)
 
 
@@ -323,6 +328,8 @@ def _apply_tuning(args) -> None:
         os.environ["SLOTBANK_DIRECT"] = "1"
     if getattr(args, "condense", False):
         os.environ["SLOTBANK_CONDENSE"] = "1"
+    if getattr(args, "no_envelope", False):
+        os.environ["SLOTBANK_ENVELOPE"] = "0"
     draft = getattr(args, "draft", None)
     no_draft = getattr(args, "no_draft", False) and not draft
     if no_draft:
@@ -363,6 +370,30 @@ def _auto_draft_path(model: str | None) -> str | None:
         return discover_sidecar_draft(path)
     except (ValueError, OSError, ImportError):
         return None
+
+
+def _enable_serve_envelope(args) -> None:
+    """Make serve absorb OMP's harness instead of 400ing a first hi.
+
+    Condense + slim tools cut the 26k–39k dump to a Metal-safe prompt.
+    Pack is the last resort if the template is still over cap. Prefix
+    cache reuses the stable system head so later turns skip that prefill.
+    """
+    if getattr(args, "no_envelope", False) or os.environ.get(
+        "SLOTBANK_ENVELOPE", "",
+    ).strip().lower() in {"0", "off", "false", "no"}:
+        os.environ["SLOTBANK_ENVELOPE"] = "0"
+        return
+    os.environ["SLOTBANK_ENVELOPE"] = "1"
+    os.environ.setdefault("SLOTBANK_CONDENSE", "1")
+    os.environ.setdefault("SLOTBANK_PROMPT_PACK", "1")
+    os.environ.setdefault("SLOTBANK_PREFIX_CACHE", "1")
+    if not os.environ.get("SLOTBANK_CONTEXT_DIR", "").strip():
+        from pathlib import Path
+
+        dest = Path.home() / ".local" / "share" / "slotbank" / "sessions" / "omp"
+        dest.mkdir(parents=True, exist_ok=True)
+        os.environ["SLOTBANK_CONTEXT_DIR"] = str(dest)
 
 
 def _model_args(p: argparse.ArgumentParser) -> None:
@@ -485,11 +516,8 @@ def _omp(args) -> int:
     print(f"agent:  {agent_selector(mid)}  (tools + thinking)")
     print(f"also:   {lm_studio_selector(mid)}")
     print("then:   omp models refresh")
-    print("        two-stage: cloud subscription = full OMP harness;")
-    print("        slotbank serve --condense = local 27B (ask + citations)")
-    print("        mkdir /tmp/sb-hi && cd /tmp/sb-hi && omp --no-tools")
-    print("        (not ~/Desktop/slotbank; not /tmp if /tmp/<repo> exists)")
-    print("        footer `/tmp ↳ name` = OMP injected that child git repo")
+    print("        serve envelopes OMP dumps (condense + slim tools + pack)")
+    print("        cloud subscription still keeps the full harness if you have one")
     print("        wait for serve 'ready' before sending")
     return 0
 
@@ -512,6 +540,7 @@ def _serve(args) -> int:
             f"slotbank: {repo} is not downloaded. Run: slotbank pull {args.model}\n")
         return 2
     _apply_tuning(args)
+    _enable_serve_envelope(args)
     mid = public_model_id(path)
     omp_path = None
     if not getattr(args, "no_omp", False):
@@ -535,7 +564,12 @@ def _serve(args) -> int:
         f"\n  max prompt                 {cap_note} tokens "
         f"(SLOTBANK_MAX_PROMPT; 0 disables)"
     )
-    if os.environ.get("SLOTBANK_CONDENSE", "").strip().lower() in {
+    if os.environ.get("SLOTBANK_ENVELOPE", "").strip() == "1":
+        extra += (
+            "\n  envelope                   on "
+            "(condense OMP dump, slim tools, pack leftovers, prefix cache)"
+        )
+    elif os.environ.get("SLOTBANK_CONDENSE", "").strip().lower() in {
         "1", "true", "yes", "on",
     }:
         extra += (
@@ -550,9 +584,8 @@ def _serve(args) -> int:
             f"  OMP also                   {lm_studio_selector(mid)}\n"
             f"  OMP models.yml             {omp_path}\n"
             f"  refresh                    omp models refresh\n"
-            f"  cwd                        mkdir /tmp/sb-hi && cd there "
-            f"(not /tmp if a git child exists)\n"
-            f"  first hi                   wait for 'ready'; omp --no-tools"
+            f"  first hi                   wait for 'ready' — serve envelopes "
+            f"the harness dump"
         )
     proxy = EngineProxy(LoadingEngine(mid))
     app = create_app(proxy, api_key=args.api_key)
