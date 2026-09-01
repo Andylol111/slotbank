@@ -663,6 +663,7 @@ class Runtime:
         self._draft_block = None
         self._draft_cap = None
         self._dflash_cache = None
+        self._pinned = False
 
     @property
     def tokenizer(self):
@@ -672,7 +673,14 @@ class Runtime:
     def model_path(self) -> str:
         return self._model_path
 
-    def load(self, progress=None) -> None:
+    def load(self, progress=None, *, pin: bool = True) -> None:
+        """Map the graph. ``pin=False`` leaves mx.eval of the 15 GiB pack for ``pin()``.
+
+        OMP's picker waits on /models/load, which waits for Engine ready.
+        The ~30s is _pin_dense, not safetensors mmap. Serve sets ready after
+        this returns so the spinner can drop; the worker then pins before
+        the first generate.
+        """
         if progress is not None:
             progress("load", 0, 1)
         _tune_metal()
@@ -685,8 +693,6 @@ class Runtime:
 
         install_expert_slots(model, model_path=self._model_path, um=self.um)
         _strip_unused(model)
-        if _is_dense(self.um):
-            _pin_dense(model)
         self._wired = self._raise_wired_limit(model)
         self._model = model
         # The warm pass is deferred to the first request that can pay for it.
@@ -710,8 +716,24 @@ class Runtime:
                 pass
         self._logprobs = _compile_logprobs()
         self._load_draft()
+        if pin:
+            self.pin()
         if progress is not None:
             progress("load", 1, 1)
+
+    def pin(self) -> None:
+        """Fault 4-bit leaves into Metal so decode does not stall on SSD.
+
+        Safe to call twice. Dense 27B + sidecar MTP are both pinned; MoE
+        stays lazy until the warm pass.
+        """
+        if self._pinned:
+            return
+        if self._model is not None and _is_dense(self.um):
+            _pin_dense(self._model)
+        if self._draft is not None:
+            _pin_dense(self._draft)
+        self._pinned = True
 
     def _load_draft(self) -> None:
         import os
@@ -743,7 +765,6 @@ class Runtime:
                 "DFlash verify needs an mlx-vlm model with language_model"
             )
         validate_drafter_compatibility(self._model, draft, resolved)
-        _pin_dense(draft)
         self._draft = draft
         self._draft_kind = resolved
 
@@ -927,6 +948,7 @@ class Runtime:
         from mlx_lm.models.cache import make_prompt_cache
         from mlx_lm.sample_utils import make_sampler
 
+        self.pin()
         ids = [int(x) for x in input_ids]
         if not ids:
             raise ValueError("empty prompt")

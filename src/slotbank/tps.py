@@ -57,6 +57,16 @@ class Strategy:
 
 STRATEGIES: tuple[Strategy, ...] = (
     Strategy(
+        "omp-defer-weight-pin",
+        ADOPTED,
+        "OMP /models/load returns after mmap; mx.eval of the 15 GiB pack runs before the first job.",
+        "The picker spinner was waiting on _pin_dense, not Python graph construction. "
+        "Engine sets ready after lazy load + tokenizer + draft mmap, then pins on the "
+        "Metal thread. First generate waits on that pin if you send immediately. "
+        "Restarting serve re-pays it. Omitting --vision saves ~0.4 GiB, not the 30s. "
+        "Does not page hybrid KV or change 27B weights.",
+    ),
+    Strategy(
         "sidecar-mtp-k3",
         ADOPTED,
         "Native MTP sidecar at trained block_size=3, mlx-vlm exact verify.",
@@ -333,7 +343,8 @@ STRATEGIES: tuple[Strategy, ...] = (
         "8192. PrefixCache snaps at most 2048 tokens / 384 MiB (a 10k copy was ~790 MiB "
         "and jetsamed 24 GB). YAML maxTokens 2048. Qwen /no_think (qwen-no-think-prompt) "
         "stops the think dump on hi. SpecialHoldback strips streamed <|im_end|>. "
-        "Does not page hybrid KV. 30s boot is 27B 4-bit load.",
+        "Does not page hybrid KV. ~30s is 27B 4-bit pin into Metal; "
+        "OMP /models/load now returns after mmap (omp-defer-weight-pin).",
     ),
     Strategy(
         "qwen-no-think-prompt",
