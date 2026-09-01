@@ -1152,7 +1152,6 @@ class Runtime:
     def _iter_draft(self):
         import mlx.core as mx
         from mlx_vlm.generate.ar import generate_step
-        from mlx_vlm.generate.dispatch import _prime_cached_prefix_rope_state
         from mlx_vlm.models import cache as vlm_cache
 
         if self._cancelled:
@@ -1160,6 +1159,9 @@ class Runtime:
         sp = self._sampling_params
         if sp is None:
             raise ValueError("start_request first")
+        # generate_step reads K once. A previous low-accept turn used to leave
+        # this at 1 and the next OMP "hi" ran at greedy speed.
+        self._arm_draft_block()
         prompt_ids = self._prompt_ids
         live_n, _live_feed = draft_feed(
             self._fed_ids, prompt_ids, self._dflash_cache is not None
@@ -1198,9 +1200,12 @@ class Runtime:
                     prefix_n,
                     commit_fed=False,
                 )
-            if prefix_n > 0:
-                full = mx.array([prompt_ids], dtype=mx.int32)
-                _prime_cached_prefix_rope_state(self._model, full, None, {})
+            # Do not prime Qwen mRoPE on the full prompt before decode.
+            # mlx-vlm's helper writes deltas onto the LM and into kwargs;
+            # generate_step then nulls them, and we never forwarded the
+            # kwargs. On an 8k envelope that was a full-prompt rope index,
+            # then discard. Pyramid tiles + last-token generate_step
+            # continue from cache offset.
             ids = mx.array([[prompt_ids[-1]]], dtype=mx.int32)
             top_k = sp.top_k if sp.top_k and sp.top_k > 0 else 0
             # Last prompt token only: pyramid tiles already filled the prefix.
@@ -1238,11 +1243,24 @@ class Runtime:
             self._dflash_cache = None
             self._fed_ids = []
             raise
-        finally:
-            self._retune_draft_block()
+
+    def _arm_draft_block(self) -> None:
+        """Start every request at the trained/user K.
+
+        generate_step takes one draft_block_size. Shrinking after a round
+        cannot help that round, and persisting it made the next OMP turn
+        inherit K=1. Daily 27B always uses the MTP/DFlash cap (3 or 8).
+        """
+        if self._draft_cap is not None:
+            self._draft_block = int(self._draft_cap)
 
     def _retune_draft_block(self) -> None:
-        """Move K by 1 from last-round accept. Never past the trained/user cap."""
+        """Move K by 1 from last-round accept. Never past the trained/user cap.
+
+        Not used on the daily MTP door: generate_step cannot change K mid-round,
+        and _arm_draft_block resets to the cap for the next request. Kept so
+        SLOTBANK_DAIS can still be measured in isolation.
+        """
         import os
 
         if self._draft is None or self._draft_cap is None:
@@ -1300,8 +1318,6 @@ class Runtime:
         emitted either way is accounted identically.
         """
         self._quantize_kv()
-        import mlx.core as mx
-
         self._generated.append(token_id)
         self._total_generated += 1
         self._last_token = token_id
@@ -1319,12 +1335,14 @@ class Runtime:
             reason = "length"
         else:
             reason = None
+        # Do not mx.get_active_memory() per token: nothing reads
+        # GenerationStep.active_memory_bytes, and the query sits on the
+        # decode loop.
         return GenerationStep(
             token_id=token_id,
             finished=finished,
             finish_reason=reason,
             matched_stop=matched,
-            active_memory_bytes=int(mx.get_active_memory() or 0),
         )
 
     def cancel(self) -> None:
