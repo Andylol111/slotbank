@@ -627,8 +627,8 @@ class Runtime:
     def __init__(self, args, *, eos_token_ids: set[int] | None = None, um=None):
         self._model_path = args.model_path
         default_step = getattr(args, "prefill_step_size", 2048) or 2048
-        if _is_dense(um):
-            default_step = 512
+        # Pyramid + PREFILL_BUDGET cap the attention-score peak. A fixed 512
+        # on dense 27B used to throttle every tile, including the first 8k.
         self._prefill_step_size = _prefill_step(default_step)
         self._eos_token_ids: set[int] = set(eos_token_ids or ())
         self.um = um

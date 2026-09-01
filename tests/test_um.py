@@ -164,6 +164,19 @@ def test_pyramid_step_keeps_early_tiles_large(monkeypatch):
     # 8k cap path stays the measured 2048 chunk
     assert _pyramid_step(2048, 0, 8192) == 2048
     assert _pyramid_step(2048, 8192, 8192) == 1
+    # 512 used to be the dense default; it must not be what pyramid prefers
+    assert _pyramid_step(2048, 0, 10240) == 2048
+    assert _pyramid_step(512, 0, 10240) == 512
+
+
+def test_dense_runtime_does_not_clamp_prefill_to_512():
+    from types import SimpleNamespace
+
+    from slotbank.runtime import Runtime
+
+    um = SimpleNamespace(card=SimpleNamespace(kind="dense", stored_bytes=13 << 30))
+    rt = Runtime(SimpleNamespace(model_path="x"), um=um)
+    assert rt._prefill_step_size == 2048
 
 
 def _vm(free_mb, inactive_mb=6000, spec_mb=200, purge_mb=100, wired_mb=4000):

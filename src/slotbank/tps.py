@@ -224,7 +224,8 @@ STRATEGIES: tuple[Strategy, ...] = (
         "are the spike that grows with context (3.61→5.06 GiB, 256→4096). "
         "Levers that exist: shrink the prompt, SLOTBANK_PREFILL_STEP, "
         "SLOTBANK_CACHE_LIMIT_MIB, append-only suffix reuse, context OS, "
-        "8-bit KV only when not drafting. A pager would change 27B text.",
+        "PrefixCache on MTP (draft-prefix-cache), 8-bit KV only when not "
+        "drafting. A pager would change 27B text.",
         needs_trim_cache=True,
     ),
     Strategy(

@@ -332,11 +332,15 @@ def keep_token_ids(ids: list[int], cap: int) -> list[int]:
     The middle is a one-shot pyramidal sample (dense near the head). This is
     the PyramidKV + BUZZ + TriAttention idea applied to *what gets prefills*,
     not to Gated DeltaNet state.
+
+    Head length is snapped to 512, 1024, 2048, ... so PrefixCache on the
+    MTP path can restore it instead of missing a 1638-token clip.
     """
     n = len(ids)
     if n <= cap or cap <= 0:
         return list(ids)
-    head_n = max(1, cap * 2 // 10)
+    raw_head = max(1, cap * 2 // 10)
+    head_n = _snap_len(raw_head)
     tail_n = max(1, cap * 5 // 10)
     if head_n + tail_n > cap:
         tail_n = min(cap, max(1, cap - 1))
@@ -348,6 +352,16 @@ def keep_token_ids(ids: list[int], cap: int) -> list[int]:
     tail = ids[-tail_n:]
     mid = _pyramid_sample(ids[head_n : n - tail_n], mid_n)
     return head + mid + tail
+
+
+def _snap_len(n: int) -> int:
+    """Largest 512×2^k that still fits in n. Tiny heads stay as-is."""
+    if n < 512:
+        return n
+    snap = 512
+    while snap * 2 <= n:
+        snap *= 2
+    return snap
 
 
 def maybe_pack_prompt(ids: list[int]) -> list[int]:
