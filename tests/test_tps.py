@@ -70,6 +70,8 @@ def test_catalog_sound():
     assert get("qwen-chat-prefix-stable").needs_trim_cache is False
     assert get("omp-reencode-prefix").status == ADOPTED
     assert get("omp-reencode-prefix").needs_trim_cache is False
+    assert get("omp-cold-prefill-n").status == ADOPTED
+    assert get("omp-cold-prefill-n").needs_trim_cache is False
     assert get("metal-qmm-prefill").status == DEFERRED
     assert get("ane-npu-prefill").status == REJECTED
     assert get("warm-prefix-at-load").status != ADOPTED
@@ -307,6 +309,7 @@ def test_prefill_ids_pipelines_tiles():
     src = inspect.getsource(Runtime._prefill_ids)
     assert "_realize_prefill" in src
     assert "_cut_prefill_tile" in src
+    assert "_PrefillCacheScope" in src
     assert src.count("clear_cache") == 1
     loop = src[src.index("while offset") : src.index("if prev is not None")]
     assert "clear_cache" not in loop

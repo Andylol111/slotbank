@@ -413,28 +413,99 @@ def _realize_prefill(mx, states, *, wait: bool) -> None:
     mx.eval(states)
 
 
-def _tune_metal() -> None:
-    """Cap the allocator cache so freed activations do not sit at peak.
+def _cache_limit_mib(name: str, default: int) -> int:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _decode_cache_limit_bytes() -> int | None:
+    """SLOTBANK_CACHE_LIMIT_MIB: idle pool after decode (default 512).
 
     Peak on the 3.5bpw pack was 14.22 GiB against a 13.3 GiB max_buffer_length.
     A large MLX cache is how a 12.5 GiB language model grows another 1+ GiB
-    after the first prefill. SLOTBANK_CACHE_LIMIT_MIB overrides (default 512).
+    after the first prefill.
+    """
+    mib = _cache_limit_mib("SLOTBANK_CACHE_LIMIT_MIB", 512)
+    if mib <= 0:
+        return None
+    return mib << 20
+
+
+def _prefill_cache_limit_bytes() -> int | None:
+    """Pool size during a 27B tile.
+
+    mlx#3350: a tiny free-cache forces Metal malloc per layer and can make
+    inference several times slower. Default decode pool is 512 MiB so idle
+    activations do not sit at peak on 24 GB. Prefill needs reuse: 2048 MiB
+    fits leave-free 6g beside 15 GiB weights. SLOTBANK_PREFILL_CACHE_MIB
+    overrides. If the user set SLOTBANK_CACHE_LIMIT_MIB, they chose the
+    jetsam bound — honor it for both.
     """
     import os
 
+    if os.environ.get("SLOTBANK_PREFILL_CACHE_MIB", "").strip():
+        mib = _cache_limit_mib("SLOTBANK_PREFILL_CACHE_MIB", 2048)
+    elif os.environ.get("SLOTBANK_CACHE_LIMIT_MIB", "").strip():
+        mib = _cache_limit_mib("SLOTBANK_CACHE_LIMIT_MIB", 512)
+    else:
+        mib = 2048
+    if mib <= 0:
+        return None
+    return mib << 20
+
+
+def _metal_cache_setter():
     import mlx.core as mx
 
     if not hasattr(mx, "metal") or not mx.metal.is_available():
+        return None
+    return getattr(mx, "set_cache_limit", None) or getattr(
+        mx.metal, "set_cache_limit", None
+    )
+
+
+def _tune_metal() -> None:
+    """Cap the idle allocator cache. Prefill raises this for the tile."""
+    setter = _metal_cache_setter()
+    if setter is None:
         return
-    raw = os.environ.get("SLOTBANK_CACHE_LIMIT_MIB", "512").strip()
-    try:
-        mib = int(raw)
-    except ValueError:
-        mib = 512
-    if mib <= 0:
+    limit = _decode_cache_limit_bytes()
+    if limit is None:
         return
-    setter = getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit
-    setter(mib << 20)
+    setter(limit)
+
+
+class _PrefillCacheScope:
+    """Raise the Metal free-cache for one prefill, then restore decode size."""
+
+    def __enter__(self):
+        self._setter = _metal_cache_setter()
+        self._prev = None
+        want = _prefill_cache_limit_bytes()
+        if self._setter is None or want is None:
+            self._setter = None
+            return self
+        try:
+            self._prev = self._setter(want)
+        except (TypeError, ValueError, RuntimeError):
+            self._setter = None
+            self._prev = None
+        return self
+
+    def __exit__(self, *exc):
+        if self._setter is not None and self._prev is not None:
+            try:
+                self._setter(int(self._prev))
+            except (TypeError, ValueError, RuntimeError):
+                pass
+        return False
 
 
 def _generation_stream():
@@ -1097,43 +1168,44 @@ class Runtime:
         fwd = self._prefill_model()
         offset = start
         prev = None
-        while offset < end:
-            if self._cancelled:
-                raise Cancelled()
-            chunk_end = _cut_prefill_tile(
-                self._prefill_step_size, offset, end, snaps
-            )
-            snap_at = chunk_end in snaps
-            with mx.stream(stream):
-                chunk = prompt[offset:chunk_end][None]
-                prefill_forward(fwd, chunk, cache)
-                states = _cache_states(cache)
-                if snap_at:
-                    # put() copies arrays the next tile mutates in place.
-                    if prev is not None:
-                        mx.eval(prev)
-                        prev = None
-                    _realize_prefill(mx, states, wait=True)
-                else:
-                    _realize_prefill(mx, states, wait=False)
-                    if prev is not None:
-                        mx.eval(prev)
-                    prev = states
-            if commit_fed:
-                self._fed_ids.extend(ids[offset:chunk_end])
-            offset = chunk_end
-            if self._prefix is not None and snap_at:
+        with _PrefillCacheScope():
+            while offset < end:
+                if self._cancelled:
+                    raise Cancelled()
+                chunk_end = _cut_prefill_tile(
+                    self._prefill_step_size, offset, end, snaps
+                )
+                snap_at = chunk_end in snaps
+                with mx.stream(stream):
+                    chunk = prompt[offset:chunk_end][None]
+                    prefill_forward(fwd, chunk, cache)
+                    states = _cache_states(cache)
+                    if snap_at:
+                        # put() copies arrays the next tile mutates in place.
+                        if prev is not None:
+                            mx.eval(prev)
+                            prev = None
+                        _realize_prefill(mx, states, wait=True)
+                    else:
+                        _realize_prefill(mx, states, wait=False)
+                        if prev is not None:
+                            mx.eval(prev)
+                        prev = states
+                if commit_fed:
+                    self._fed_ids.extend(ids[offset:chunk_end])
+                offset = chunk_end
+                if self._prefix is not None and snap_at:
+                    try:
+                        self._prefix.put(ids[:offset], cache)
+                    except (ValueError, TypeError, RuntimeError):
+                        pass
+            if prev is not None:
+                mx.eval(prev)
+            if self._prefix is not None and end >= PrefixCache.MIN_PREFIX:
                 try:
-                    self._prefix.put(ids[:offset], cache)
+                    self._prefix.put(ids[:end], cache)
                 except (ValueError, TypeError, RuntimeError):
                     pass
-        if prev is not None:
-            mx.eval(prev)
-        if self._prefix is not None and end >= PrefixCache.MIN_PREFIX:
-            try:
-                self._prefix.put(ids[:end], cache)
-            except (ValueError, TypeError, RuntimeError):
-                pass
         mx.clear_cache()
 
     def _quantize_kv(self) -> None:

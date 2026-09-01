@@ -444,6 +444,20 @@ def test_prefix_budget_bytes(monkeypatch):
     assert _prefix_budget_bytes() == 384 << 20
 
 
+def test_prefill_cache_limit_defaults(monkeypatch):
+    from slotbank.runtime import _decode_cache_limit_bytes, _prefill_cache_limit_bytes
+
+    monkeypatch.delenv("SLOTBANK_CACHE_LIMIT_MIB", raising=False)
+    monkeypatch.delenv("SLOTBANK_PREFILL_CACHE_MIB", raising=False)
+    assert _decode_cache_limit_bytes() == 512 << 20
+    assert _prefill_cache_limit_bytes() == 2048 << 20
+    monkeypatch.setenv("SLOTBANK_CACHE_LIMIT_MIB", "256")
+    assert _decode_cache_limit_bytes() == 256 << 20
+    assert _prefill_cache_limit_bytes() == 256 << 20
+    monkeypatch.setenv("SLOTBANK_PREFILL_CACHE_MIB", "1024")
+    assert _prefill_cache_limit_bytes() == 1024 << 20
+
+
 def test_quantize_kv_is_a_noop_without_a_cache(monkeypatch):
     """_quantize_kv runs on every generated token, including before the first
     prefill has built a cache."""

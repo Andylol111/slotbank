@@ -368,9 +368,14 @@ def condense_harness_messages(
 
     User dumps use one recipe whether they are the last ask or history.
     A follow-up that tail-clipped user1 used to miss PrefixCache.
+
+    Envelope caps the system head at ENVELOPE_SYS_TOKENS on every turn
+    (not only short asks) so PrefixCache still hits after a longer follow-up.
     """
     budget = condense_budget() if budget is None else max(64, int(budget))
     sys_n = max(64, budget * 15 // 100)
+    if _envelope_on():
+        sys_n = min(sys_n, ENVELOPE_SYS_TOKENS)
     cite_n = max(64, budget * 25 // 100)
     ask_n = max(128, budget - sys_n - cite_n)
     out: list[dict[str, Any]] = []
@@ -432,6 +437,10 @@ DEFAULT_MAX_PROMPT_TOKENS = 8192
 # KV plus a 790 MiB prefix copy; that is what skyrocketed RAM on 24 GB.
 DEFAULT_ENVELOPE_MAX_PROMPT = 8192
 TOOL_SLIM_BUDGET = 256
+# Envelope used to keep 15% of 8192 ≈ 1228 tokens of OMP system on every
+# first hi. At ~48 tok/s that is ~25 s of cold prefill before the ask.
+# Cloud still has the full harness. 256 is a stable PrefixCache head.
+ENVELOPE_SYS_TOKENS = 256
 
 
 def max_prompt_tokens() -> int:
