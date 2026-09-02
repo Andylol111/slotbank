@@ -1,0 +1,24 @@
+{
+  "as_of": "2026-09-01",
+  "source_count": 112,
+  "official_qwen_mac_toks_rows": 0,
+  "over_200pct_ids": [
+    "omlx-ane-prefill-4k",
+    "air-prefix-reuse"
+  ],
+  "over_200pct_are_ane_or_cache": true,
+  "ane_prefill_increase_pct": 230.12048192771087,
+  "ane_prefill_times": 3.3012048192771086,
+  "ane_fits_24g_air": false,
+  "omlx_tg_increase_pct": 64.64646464646465,
+  "omlx_tg_air_before": 5.94,
+  "omlx_tg_air_after": 9.78,
+  "air_greedy": 5.71,
+  "air_mtp": 13.47,
+  "air_mtp_increase_pct": 135.90192644483363,
+  "air_prefill_toks": 48.1764705882353,
+  "plus_200pct_would_need_decode": 17.13,
+  "plus_200pct_would_need_prefill": 144.52941176470588,
+  "dense_27b_mac_rows": 10,
+  "verdict": "No official Qwen Mac +200% 27B table. The +230% figure is oMLX ANE prefill on 128 GB Max machines. This Air already matches bandwidth-scaled oMLX decode via MTP. ANE does not fit 24 GB."
+}

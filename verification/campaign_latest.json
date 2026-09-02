@@ -1,0 +1,742 @@
+{
+  "campaign_id": "20260902T001357Z",
+  "utc": "2026-09-02T00:14:02.145422+00:00",
+  "protocol": {
+    "name": "slotbank paper verification campaign",
+    "independent": "prompt class (short / file dump / cwd dump / 26k / 39k), turn (first vs follow-up), leave-free (6g vs 8g), catalog status, draft trained K, temperature relative to 0.99",
+    "dependent": "system tokens after condense, packed id length, stable_prefix_n, admit.ok, catalog_sound, pin equality, session_ok",
+    "not_measured": "task quality of condensed vs full OMP harness (C-quality); fanless soak tok/s (C-soak); live Metal 27B tok/s on this VM (C-metal-toks)",
+    "oracle": "Bit-identity is not claimed here. Structural oracles are token-budget caps, exact prefix equality, catalog fail-closed, and pin drift."
+  },
+  "research_questions": [
+    {
+      "id": "RQ1",
+      "title": "Decode and prefill clocks",
+      "question": "On a fanless 24 GB M4 Air, what named clocks does Qwen3.8-27B-4bit actually hit, and how do they sit against bandwidth-scaled Max numbers and the 2026 +200% Mac headline?"
+    },
+    {
+      "id": "RQ2",
+      "title": "Hybrid-safe speculation",
+      "question": "Can speculative decode raise tok/s without changing 27B text when 48/64 layers are untrimmable Gated DeltaNet?"
+    },
+    {
+      "id": "RQ3",
+      "title": "Working-set fit",
+      "question": "What leave-free and slot-capacity rules admit 27B dense plus sidecar, or 35B-A3B experts, on 24 GB without pretending the page cache is VRAM?"
+    },
+    {
+      "id": "RQ4",
+      "title": "Fail-closed policy",
+      "question": "Can admission, catalog, and OMP policy be checked on a machine that cannot pin 15 GiB, and do those checks refuse routes that change tokens?"
+    },
+    {
+      "id": "RQ5",
+      "title": "Envelope structure",
+      "question": "Does the local envelope keep system\u2264256, packed ids\u22648192, and a history-stable prefix on OMP-shaped dumps, without claiming task quality?"
+    }
+  ],
+  "host": {
+    "system": "Linux",
+    "machine": "x86_64",
+    "python": "3.12.3",
+    "metal_27b": false,
+    "note": "Linux cloud workspace; Air clocks are pins, not retimes."
+  },
+  "pytest": {
+    "filtered": {
+      "cmd": [
+        "/usr/bin/python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "--tb=line",
+        "-o",
+        "cache_dir=/tmp/pytest-slotbank",
+        "-k",
+        "not huggingface and not hub_progress and not rich and not download_view and not plain_progress and not resolve_passes and not shed_keeps and not strip_unused"
+      ],
+      "returncode": 0,
+      "counts": {
+        "passed": 221,
+        "failed": 0,
+        "skipped": 23,
+        "deselected": 7,
+        "error": 0,
+        "warning": 1
+      },
+      "tail": [
+        "............................                                             [100%]",
+        "=============================== warnings summary ===============================",
+        "../home/ubuntu/.local/lib/python3.12/site-packages/fastapi/testclient.py:1",
+        "  /home/ubuntu/.local/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.",
+        "    from starlette.testclient import TestClient as TestClient  # noqa",
+        "",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+        "221 passed, 23 skipped, 7 deselected, 1 warning in 1.53s"
+      ]
+    },
+    "full": {
+      "cmd": [
+        "/usr/bin/python3",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "--tb=line",
+        "-o",
+        "cache_dir=/tmp/pytest-slotbank"
+      ],
+      "returncode": 1,
+      "counts": {
+        "passed": 221,
+        "failed": 7,
+        "skipped": 23,
+        "deselected": 0,
+        "error": 0,
+        "warning": 1
+      },
+      "expected_optional_failures": [
+        "tests/test_cli.py::test_resolve_passes_through_explicit_ids",
+        "tests/test_cli.py::test_hub_progress_receives_the_name_kwarg",
+        "tests/test_cli.py::test_hub_progress_forces_disable_off",
+        "tests/test_cli.py::test_plain_progress_has_no_escape_codes_and_is_throttled",
+        "tests/test_cli.py::test_download_view_never_paints_over_a_pipe",
+        "tests/test_kv_quant.py::test_shed_keeps_dflash_session",
+        "tests/test_kv_quant.py::test_strip_unused_drops_vision"
+      ],
+      "tail": [
+        "    from starlette.testclient import TestClient as TestClient  # noqa",
+        "",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+        "=========================== short test summary info ============================",
+        "FAILED tests/test_cli.py::test_resolve_passes_through_explicit_ids - ModuleNo...",
+        "FAILED tests/test_cli.py::test_hub_progress_receives_the_name_kwarg - ModuleN...",
+        "FAILED tests/test_cli.py::test_hub_progress_forces_disable_off - ModuleNotFou...",
+        "FAILED tests/test_cli.py::test_plain_progress_has_no_escape_codes_and_is_throttled",
+        "FAILED tests/test_cli.py::test_download_view_never_paints_over_a_pipe - Modul...",
+        "FAILED tests/test_kv_quant.py::test_shed_keeps_dflash_session - ModuleNotFoun...",
+        "FAILED tests/test_kv_quant.py::test_strip_unused_drops_vision - ModuleNotFoun...",
+        "7 failed, 221 passed, 23 skipped, 1 warning in 1.57s"
+      ]
+    },
+    "paper": {
+      "cmd": [
+        "/usr/bin/python3",
+        "-m",
+        "pytest",
+        "tests/test_paper_verification.py",
+        "tests/test_fence.py",
+        "-q",
+        "--tb=short",
+        "-o",
+        "cache_dir=/tmp/pytest-slotbank"
+      ],
+      "returncode": 0,
+      "counts": {
+        "passed": 29,
+        "failed": 0,
+        "skipped": 0,
+        "deselected": 0,
+        "error": 0,
+        "warning": 0
+      },
+      "tail": [
+        ".............................                                            [100%]",
+        "29 passed in 0.35s"
+      ]
+    }
+  },
+  "air_pins": {
+    "greedy_toks": 5.71,
+    "mtp_k3_count": 13.47,
+    "mtp_k3_code": 9.95,
+    "dflash_k8_count": 11.76,
+    "dflash_k8_code": 9.1,
+    "bandwidth_bytes_s": 128849018880,
+    "weight_bytes_4bit": 16106127360,
+    "prefill_819_s": 17.0,
+    "prefill_819_reuse_s": 0.88
+  },
+  "mac_review": {
+    "as_of": "2026-09-01",
+    "source_count": 112,
+    "official_qwen_mac_toks_rows": 0,
+    "over_200pct_ids": [
+      "omlx-ane-prefill-4k",
+      "air-prefix-reuse"
+    ],
+    "over_200pct_are_ane_or_cache": true,
+    "ane_prefill_increase_pct": 230.12048192771087,
+    "ane_prefill_times": 3.3012048192771086,
+    "ane_fits_24g_air": false,
+    "omlx_tg_increase_pct": 64.64646464646465,
+    "omlx_tg_air_before": 5.94,
+    "omlx_tg_air_after": 9.78,
+    "air_greedy": 5.71,
+    "air_mtp": 13.47,
+    "air_mtp_increase_pct": 135.90192644483363,
+    "air_prefill_toks": 48.1764705882353,
+    "plus_200pct_would_need_decode": 17.13,
+    "plus_200pct_would_need_prefill": 144.52941176470588,
+    "dense_27b_mac_rows": 10,
+    "verdict": "No official Qwen Mac +200% 27B table. The +230% figure is oMLX ANE prefill on 128 GB Max machines. This Air already matches bandwidth-scaled oMLX decode via MTP. ANE does not fit 24 GB."
+  },
+  "claims": [
+    {
+      "id": "C-fence",
+      "kind": "verified_here",
+      "rq": "RQ4",
+      "test": "tests/test_fence.py::test_only_three_files_import_mlx",
+      "also": "tests/test_paper_verification.py::test_C_fence",
+      "statement": "Only runtime.py, expert_slots.py, offload_cache.py import MLX.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-catalog",
+      "kind": "verified_here",
+      "rq": "RQ4",
+      "test": "tests/test_paper_verification.py::test_C_catalog",
+      "statement": "Fail-closed catalog: banned ids cannot be adopted; adopted routes keep 27B text.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-clocks",
+      "kind": "air_pinned",
+      "rq": "RQ1",
+      "test": "tests/test_paper_verification.py::test_C_clocks",
+      "statement": "Named Air clocks: 5.71 greedy, 13.47/9.95 MTP, 11.76/9.10 DFlash, 17.0s/0.88s prefill.",
+      "campaign_status": "pin_checked"
+    },
+    {
+      "id": "C-pack-ceil",
+      "kind": "verified_here",
+      "rq": "RQ1",
+      "test": "tests/test_paper_verification.py::test_C_pack_ceil",
+      "statement": "4-bit pack-read ceiling on 120 GB/s is in [7, 9] tok/s.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-mac200",
+      "kind": "verified_here",
+      "rq": "RQ1",
+      "test": "tests/test_paper_verification.py::test_C_mac200",
+      "statement": "No official Qwen Mac tok/s row; +200% dense-27B Mac hit is ANE prefill, not this Air.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-scale",
+      "kind": "verified_here",
+      "rq": "RQ1",
+      "test": "tests/test_paper_verification.py::test_C_scale",
+      "statement": "oMLX M3 Max decode scaled by 120/400 is 5.94 / 9.78, near the pinned Air rates.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-hybrid-kv",
+      "kind": "verified_here",
+      "rq": "RQ2",
+      "test": "tests/test_paper_verification.py::test_C_hybrid_kv",
+      "statement": "Qwen3.8 hybrid full-attn KV is 64 KiB/token; can_trim path is refused without dflash verify.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-trained-k",
+      "kind": "verified_here",
+      "rq": "RQ2",
+      "test": "tests/test_paper_verification.py::test_C_trained_k",
+      "statement": "Draft block is trained K (MTP 3, DFlash 8), not a forced 5.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-leave-free",
+      "kind": "verified_here",
+      "rq": "RQ3",
+      "test": "tests/test_paper_verification.py::test_C_leave_free",
+      "statement": "24 GB default leave-free is 8 GiB; 27B 4-bit + sidecar needs 6 GiB leave-free (18 GiB WS).",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-slots-c",
+      "kind": "verified_here",
+      "rq": "RQ3",
+      "test": "tests/test_paper_verification.py::test_C_slots_c",
+      "statement": "35B-A3B on 24 GB picks C in (16, 256); OLMoE stays at the 2\u00d7top-k floor.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-sys-cap",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_sys_cap",
+      "statement": "Envelope system head is 256 tokens on every turn, including follow-up.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-history",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_history",
+      "statement": "User-dump condense is the same recipe as last-ask and as history.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-prefix",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_prefix",
+      "statement": "Follow-up encode shares stable_prefix_n with the first encode (pre /no_think body).",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-pack-8k",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_pack_8k",
+      "statement": "After envelope, Metal prompt ids are \u2264 8192; 26k/39k dumps do not refuse.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-pyramid",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_pyramid",
+      "statement": "keep_token_ids is sink + pyramid middle + tail; 8k head lands on 2048.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-slim",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_slim",
+      "statement": "slim_tools drops JSON schemas and stays inside the 256-token tool budget.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-inject",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_inject",
+      "statement": "Serve envelope does not compile CONTEXT_DIR back into the prefix unless inject=1.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-context",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_context",
+      "statement": "Context OS log is append-only; compile is newest verbatim spans, not a paraphrase.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-session",
+      "kind": "verified_here",
+      "rq": "RQ2",
+      "test": "tests/test_paper_verification.py::test_C_session",
+      "statement": "dflash_session_ok refuses attention offset past |fed|.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-sampling",
+      "kind": "verified_here",
+      "rq": "RQ2",
+      "test": "tests/test_paper_verification.py::test_C_sampling",
+      "statement": "OMP temperature \u2265 0.99 remaps to Qwen's documented instruct pair; T<0.99 is left alone.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-suite",
+      "kind": "verified_here",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_suite",
+      "statement": "Envelope prompt suite: every case keeps system\u2264256, packed\u22648192, history-stable prefix.",
+      "campaign_status": "verified_here"
+    },
+    {
+      "id": "C-quality",
+      "kind": "cannot_retime",
+      "rq": "RQ5",
+      "test": "tests/test_paper_verification.py::test_C_cannot_retime_are_documented",
+      "statement": "Task quality of the condensed 8k prompt vs the full OMP harness (needs 27B + agent tasks).",
+      "campaign_status": "documented_gap"
+    },
+    {
+      "id": "C-soak",
+      "kind": "cannot_retime",
+      "rq": "RQ1",
+      "test": "tests/test_paper_verification.py::test_C_cannot_retime_are_documented",
+      "statement": "Fanless soak 60\u201370% of cool decode after 8\u201310 min (needs the Air under load).",
+      "campaign_status": "documented_gap"
+    },
+    {
+      "id": "C-metal-toks",
+      "kind": "air_pinned",
+      "rq": "RQ1",
+      "test": "tests/test_paper_verification.py::test_C_air_pinned_are_documented",
+      "statement": "Live Metal tok/s on Qwen3.8-27B-4bit; this VM has no weights.",
+      "campaign_status": "pin_checked"
+    }
+  ],
+  "suite": {
+    "n": 29,
+    "classes": [
+      "cwd",
+      "edge",
+      "file",
+      "omp-26k",
+      "omp-39k",
+      "short"
+    ],
+    "rows": [
+      {
+        "id": "short-0",
+        "class": "short",
+        "raw_user_tok": 1,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 162,
+        "first_ids": 175,
+        "follow_ids": 189,
+        "third_ids": 210,
+        "packed": 8192
+      },
+      {
+        "id": "file-0",
+        "class": "file",
+        "raw_user_tok": 1007,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 5002,
+        "first_ids": 5015,
+        "follow_ids": 5029,
+        "third_ids": 5050,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-0",
+        "class": "cwd",
+        "raw_user_tok": 787,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 560,
+        "first_ids": 573,
+        "follow_ids": 587,
+        "third_ids": 608,
+        "packed": 8192
+      },
+      {
+        "id": "short-1",
+        "class": "short",
+        "raw_user_tok": 6,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 181,
+        "first_ids": 194,
+        "follow_ids": 208,
+        "third_ids": 229,
+        "packed": 8192
+      },
+      {
+        "id": "file-1",
+        "class": "file",
+        "raw_user_tok": 1262,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 6022,
+        "first_ids": 6035,
+        "follow_ids": 6049,
+        "third_ids": 6070,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-1",
+        "class": "cwd",
+        "raw_user_tok": 1112,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 579,
+        "first_ids": 592,
+        "follow_ids": 606,
+        "third_ids": 627,
+        "packed": 8192
+      },
+      {
+        "id": "short-2",
+        "class": "short",
+        "raw_user_tok": 5,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 180,
+        "first_ids": 193,
+        "follow_ids": 207,
+        "third_ids": 228,
+        "packed": 8192
+      },
+      {
+        "id": "file-2",
+        "class": "file",
+        "raw_user_tok": 1512,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 7021,
+        "first_ids": 7034,
+        "follow_ids": 7048,
+        "third_ids": 7069,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-2",
+        "class": "cwd",
+        "raw_user_tok": 1432,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 578,
+        "first_ids": 591,
+        "follow_ids": 605,
+        "third_ids": 626,
+        "packed": 8192
+      },
+      {
+        "id": "short-3",
+        "class": "short",
+        "raw_user_tok": 7,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 185,
+        "first_ids": 198,
+        "follow_ids": 212,
+        "third_ids": 233,
+        "packed": 8192
+      },
+      {
+        "id": "file-3",
+        "class": "file",
+        "raw_user_tok": 1763,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 8026,
+        "first_ids": 8039,
+        "follow_ids": 8053,
+        "third_ids": 8074,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-3",
+        "class": "cwd",
+        "raw_user_tok": 1753,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 583,
+        "first_ids": 596,
+        "follow_ids": 610,
+        "third_ids": 631,
+        "packed": 8192
+      },
+      {
+        "id": "short-4",
+        "class": "short",
+        "raw_user_tok": 6,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 181,
+        "first_ids": 194,
+        "follow_ids": 208,
+        "third_ids": 229,
+        "packed": 8192
+      },
+      {
+        "id": "file-4",
+        "class": "file",
+        "raw_user_tok": 2012,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 9022,
+        "first_ids": 9035,
+        "follow_ids": 9049,
+        "third_ids": 9070,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-4",
+        "class": "cwd",
+        "raw_user_tok": 2072,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 579,
+        "first_ids": 592,
+        "follow_ids": 606,
+        "third_ids": 627,
+        "packed": 8192
+      },
+      {
+        "id": "short-5",
+        "class": "short",
+        "raw_user_tok": 12,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 206,
+        "first_ids": 219,
+        "follow_ids": 233,
+        "third_ids": 254,
+        "packed": 8192
+      },
+      {
+        "id": "file-5",
+        "class": "file",
+        "raw_user_tok": 2268,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 10047,
+        "first_ids": 10060,
+        "follow_ids": 10074,
+        "third_ids": 10095,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-5",
+        "class": "cwd",
+        "raw_user_tok": 2398,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 604,
+        "first_ids": 617,
+        "follow_ids": 631,
+        "third_ids": 652,
+        "packed": 8192
+      },
+      {
+        "id": "short-6",
+        "class": "short",
+        "raw_user_tok": 3,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 172,
+        "first_ids": 185,
+        "follow_ids": 199,
+        "third_ids": 220,
+        "packed": 8192
+      },
+      {
+        "id": "file-6",
+        "class": "file",
+        "raw_user_tok": 2510,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 11013,
+        "first_ids": 11026,
+        "follow_ids": 11040,
+        "third_ids": 11061,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-6",
+        "class": "cwd",
+        "raw_user_tok": 2710,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 570,
+        "first_ids": 583,
+        "follow_ids": 597,
+        "third_ids": 618,
+        "packed": 8192
+      },
+      {
+        "id": "short-7",
+        "class": "short",
+        "raw_user_tok": 8,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 189,
+        "first_ids": 202,
+        "follow_ids": 216,
+        "third_ids": 237,
+        "packed": 8192
+      },
+      {
+        "id": "file-7",
+        "class": "file",
+        "raw_user_tok": 2764,
+        "raw_sys_tok": 244,
+        "sys_tok": 244,
+        "stable_prefix_n": 12030,
+        "first_ids": 12043,
+        "follow_ids": 12057,
+        "third_ids": 12078,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-7",
+        "class": "cwd",
+        "raw_user_tok": 3034,
+        "raw_sys_tok": 124,
+        "sys_tok": 124,
+        "stable_prefix_n": 587,
+        "first_ids": 600,
+        "follow_ids": 614,
+        "third_ids": 635,
+        "packed": 8192
+      },
+      {
+        "id": "cwd-26k",
+        "class": "omp-26k",
+        "raw_user_tok": 8132,
+        "raw_sys_tok": 3004,
+        "sys_tok": 263,
+        "stable_prefix_n": 1192,
+        "first_ids": 1205,
+        "follow_ids": 1219,
+        "third_ids": 1240,
+        "packed": 8192
+      },
+      {
+        "id": "tmp-39k",
+        "class": "omp-39k",
+        "raw_user_tok": 11640,
+        "raw_sys_tok": 3754,
+        "sys_tok": 263,
+        "stable_prefix_n": 1130,
+        "first_ids": 1143,
+        "follow_ids": 1157,
+        "third_ids": 1178,
+        "packed": 8192
+      },
+      {
+        "id": "empty-ask",
+        "class": "edge",
+        "raw_user_tok": 0,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 160,
+        "first_ids": 172,
+        "follow_ids": 187,
+        "third_ids": 208,
+        "packed": 8192
+      },
+      {
+        "id": "follow-is-dump",
+        "class": "edge",
+        "raw_user_tok": 1509,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 6194,
+        "first_ids": 6207,
+        "follow_ids": 8252,
+        "third_ids": 8273,
+        "packed": 8192
+      },
+      {
+        "id": "think-tags",
+        "class": "edge",
+        "raw_user_tok": 1,
+        "raw_sys_tok": 40,
+        "sys_tok": 40,
+        "stable_prefix_n": 162,
+        "first_ids": 175,
+        "follow_ids": 215,
+        "third_ids": 236,
+        "packed": 8192
+      }
+    ]
+  },
+  "ok": true
+}
