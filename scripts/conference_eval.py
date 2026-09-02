@@ -18,6 +18,7 @@ from eval.conference import (  # noqa: E402
     alternating_summary,
     bandwidth_scale,
     c_sweep_summary,
+    decode_tier_summary,
     interior_c,
     load_pilot,
     metal_available,
@@ -72,6 +73,22 @@ def main() -> int:
         f"{bandwidth_scale(omlx['mtp_decode'], omlx['bw_gbs']):.2f}  "
         f"measured MTP-code {d27['clocks']['mtp_k3_code']}"
     )
+    print()
+    tiers = decode_tier_summary(pilot)
+    print("27B decode tiers (measured / projected / published):")
+    print(
+        f"  {tiers['n_measured']} measured, "
+        f"{tiers['n_projected']} projected, "
+        f"{tiers['n_published']} published"
+    )
+    for row in tiers["rows"]:
+        toks = row.get("toks_display", row.get("toks"))
+        if row.get("toks_lo") is not None:
+            toks = f"{row['toks_lo']:g}--{row['toks_hi']:g}"
+        elif isinstance(toks, float):
+            toks = f"{toks:.2f}"
+        print(f"  {row['kind']:<10} {row['label']:<28} {toks}")
+    print("  omits: " + "; ".join(tiers["omits"]))
     print()
     print("27B clocks are a 1-prompt, 64-token pilot. Not the 48-prompt suite.")
     out = {

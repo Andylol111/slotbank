@@ -106,6 +106,144 @@
       "metal_decode": 19.8,
       "mtp_decode": 32.6
     },
+    "projection_hosts": [
+      {
+        "id": "m4-pro-48g",
+        "label": "M4 Pro",
+        "bw_gbs": 273,
+        "ram_gb": 48,
+        "note": "usual 273 GB/s M4 Pro figure; not timed here"
+      },
+      {
+        "id": "m3-max-128g",
+        "label": "M3 Max",
+        "bw_gbs": 400,
+        "ram_gb": 128,
+        "note": "Air x 400/120 cartoon; compare to oMLX published 19.8 / 32.6"
+      },
+      {
+        "id": "m4-max-128g",
+        "label": "M4 Max 40c",
+        "bw_gbs": 546,
+        "ram_gb": 128,
+        "note": "40-core 546 GB/s; not timed here"
+      }
+    ],
+    "published_other_cases": [
+      {
+        "id": "orcarouter-m4-mini-greedy",
+        "label": "M4 mini greedy",
+        "model": "Qwen3.8-27B",
+        "machine": "M4 mini",
+        "path": "MLX, no MTP",
+        "toks_lo": 5.0,
+        "toks_hi": 6.0,
+        "phase": "decode",
+        "fits_24g": true,
+        "cite": "orcarouter2026",
+        "loader": "mlx",
+        "note": "matches this Air greedy 5.71"
+      },
+      {
+        "id": "terminalbytes-ollama-38",
+        "label": "Ollama 3.8, M3 Ultra",
+        "model": "Qwen3.8-27B",
+        "machine": "M3 Ultra",
+        "path": "Ollama Q4_K_M",
+        "toks": 14.0,
+        "phase": "decode",
+        "fits_24g": true,
+        "cite": "terminalbytes2026",
+        "loader": "ollama",
+        "note": "hybrid kernels immature; same host Qwen3.6 is 28.6"
+      },
+      {
+        "id": "omlx-2874-metal",
+        "label": "oMLX Metal, M3 Max",
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "machine": "M3 Max 128GB",
+        "path": "oMLX Metal, 16K",
+        "toks": 19.8,
+        "phase": "decode",
+        "fits_24g": false,
+        "cite": "omlx2874",
+        "loader": "omlx-metal",
+        "note": "16K / 128 GB host"
+      },
+      {
+        "id": "mlxlm-990-mtp",
+        "label": "mlx-lm \\#990 MTP, Qwen3.5",
+        "model": "Qwen3.5-27B-4bit",
+        "machine": "M4 Max 32c 36GB",
+        "path": "mlx-lm native MTP",
+        "toks": 24.0,
+        "baseline_toks": 15.3,
+        "phase": "decode",
+        "fits_24g": true,
+        "cite": "mlxlm990",
+        "loader": "mlx-lm",
+        "note": "Qwen3.5-27B, not 3.8; from 15.3 greedy"
+      },
+      {
+        "id": "terminalbytes-ollama-36",
+        "label": "Ollama 3.6, M3 Ultra",
+        "model": "Qwen3.6-27B",
+        "machine": "M3 Ultra",
+        "path": "Ollama Q4_K_M",
+        "toks": 28.6,
+        "phase": "decode",
+        "fits_24g": true,
+        "cite": "terminalbytes2026",
+        "loader": "ollama",
+        "note": "previous dense 27B; kernels were mature"
+      },
+      {
+        "id": "omlx-2874-mtp",
+        "label": "oMLX MTP, M3 Max",
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "machine": "M3 Max 128GB",
+        "path": "oMLX Metal MTP, 16K",
+        "toks": 32.6,
+        "phase": "decode",
+        "fits_24g": false,
+        "cite": "omlx2874",
+        "loader": "omlx-metal",
+        "note": "same issue 2874 pair as 19.8 Metal"
+      },
+      {
+        "id": "nathanmaine-mlxvlm-mtp",
+        "label": "mlx-vlm MTP, M5 Max",
+        "model": "Qwen3.8-27B",
+        "machine": "M5 Max 128GB",
+        "path": "mlx-vlm MTP",
+        "toks": 47.0,
+        "peak_gb": 15.5,
+        "phase": "decode",
+        "fits_24g": true,
+        "cite": "nathanmaine",
+        "loader": "mlx-vlm",
+        "note": "15.5 GB peak; pack class fits 24 GB, host is not this Air"
+      },
+      {
+        "id": "weschera-ane-mtp",
+        "label": "ANE+MTP, M4 Max",
+        "model": "Qwen3.8-27B",
+        "machine": "M4 Max 128GB",
+        "path": "oMLX ANE + native MTP",
+        "toks_lo": 53.0,
+        "toks_hi": 72.0,
+        "phase": "decode",
+        "fits_24g": false,
+        "cite": "weschera2026",
+        "loader": "omlx-ane",
+        "note": "second residency; oMLX 16K peaks 70-80 GB"
+      }
+    ],
+    "figure_omits": [
+      "RAM minus 15.1 GiB leftover DRAM is not tok/s",
+      "ANE prefill 83 to 274 tok/s is a different clock",
+      "Ollama 0.19 +93% is 35B-A3B NVFP4 on M5, not dense 27B"
+    ],
     "status": "pilot_characterization_not_the_conference_sweep"
   },
   "thermal": {
