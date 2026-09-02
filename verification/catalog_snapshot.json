@@ -1,0 +1,214 @@
+[
+  {
+    "id": "omp-defer-weight-pin",
+    "status": "adopted"
+  },
+  {
+    "id": "sidecar-mtp-k3",
+    "status": "adopted"
+  },
+  {
+    "id": "dflash2-k8",
+    "status": "attempted"
+  },
+  {
+    "id": "forced-k5",
+    "status": "rejected"
+  },
+  {
+    "id": "mtp-plus-dflash",
+    "status": "rejected"
+  },
+  {
+    "id": "ttft-is-prefill",
+    "status": "adopted"
+  },
+  {
+    "id": "skip-lm-head-prefill",
+    "status": "adopted"
+  },
+  {
+    "id": "spec-prefill-sparse",
+    "status": "rejected"
+  },
+  {
+    "id": "async-prefill-pipeline",
+    "status": "adopted"
+  },
+  {
+    "id": "gdn-chunked-cuda-prefill",
+    "status": "rejected"
+  },
+  {
+    "id": "vllm-gdn-block-apc",
+    "status": "deferred"
+  },
+  {
+    "id": "distserve-pd",
+    "status": "rejected"
+  },
+  {
+    "id": "gdn-cache-contiguous",
+    "status": "deferred"
+  },
+  {
+    "id": "qwen-chat-prefix-stable",
+    "status": "adopted"
+  },
+  {
+    "id": "omp-reencode-prefix",
+    "status": "adopted"
+  },
+  {
+    "id": "omp-cold-prefill-n",
+    "status": "adopted"
+  },
+  {
+    "id": "metal-qmm-prefill",
+    "status": "deferred"
+  },
+  {
+    "id": "ane-npu-prefill",
+    "status": "rejected"
+  },
+  {
+    "id": "qwen-mac-200pct",
+    "status": "rejected"
+  },
+  {
+    "id": "warm-prefix-at-load",
+    "status": "deferred"
+  },
+  {
+    "id": "unquantized-bf16-27b",
+    "status": "rejected"
+  },
+  {
+    "id": "extra-quant-3bit",
+    "status": "rejected"
+  },
+  {
+    "id": "dais-trained-cap",
+    "status": "adopted"
+  },
+  {
+    "id": "dais-reset-each-request",
+    "status": "adopted"
+  },
+  {
+    "id": "skip-vlm-rope-prime",
+    "status": "adopted"
+  },
+  {
+    "id": "suffix-prefix-reuse",
+    "status": "adopted"
+  },
+  {
+    "id": "context-os",
+    "status": "adopted"
+  },
+  {
+    "id": "vlm-rollback",
+    "status": "in_tree"
+  },
+  {
+    "id": "prompt-lookup",
+    "status": "in_tree"
+  },
+  {
+    "id": "mtplx-engine",
+    "status": "deferred"
+  },
+  {
+    "id": "tree-medusa-eagle",
+    "status": "deferred"
+  },
+  {
+    "id": "leap-mtp",
+    "status": "deferred"
+  },
+  {
+    "id": "ssd-double-speculate",
+    "status": "deferred"
+  },
+  {
+    "id": "sliding-window-kv",
+    "status": "rejected"
+  },
+  {
+    "id": "named-kv-survey",
+    "status": "rejected"
+  },
+  {
+    "id": "igpu-pyramid-tiles",
+    "status": "in_tree"
+  },
+  {
+    "id": "two-stage-harness",
+    "status": "in_tree"
+  },
+  {
+    "id": "hybrid-kv-dynamic-page",
+    "status": "rejected"
+  },
+  {
+    "id": "layer-stream-gdn",
+    "status": "rejected"
+  },
+  {
+    "id": "async-metal-queues",
+    "status": "rejected"
+  },
+  {
+    "id": "reverse-spec-small-writer",
+    "status": "rejected"
+  },
+  {
+    "id": "kv-quant-with-draft",
+    "status": "rejected"
+  },
+  {
+    "id": "pflash-drop-prompt",
+    "status": "rejected"
+  },
+  {
+    "id": "skip-full-attn-on-draft",
+    "status": "rejected"
+  },
+  {
+    "id": "harness-structure-for-tps",
+    "status": "rejected"
+  },
+  {
+    "id": "harness-temp-1",
+    "status": "adopted"
+  },
+  {
+    "id": "omp-serve-envelope",
+    "status": "adopted"
+  },
+  {
+    "id": "omp-session-vs-metal",
+    "status": "adopted"
+  },
+  {
+    "id": "qwen-no-think-prompt",
+    "status": "adopted"
+  },
+  {
+    "id": "qwen35-4b-as-27b-drafter",
+    "status": "rejected"
+  },
+  {
+    "id": "omp-models-yml",
+    "status": "adopted"
+  },
+  {
+    "id": "auto-sidecar-mtp",
+    "status": "adopted"
+  },
+  {
+    "id": "draft-prefix-cache",
+    "status": "adopted"
+  }
+]
