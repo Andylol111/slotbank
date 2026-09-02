@@ -152,6 +152,9 @@ def test_figure_omits_headroom_and_prefill_headlines():
     assert "13.0" in tikz
     committed = Path(__file__).resolve().parents[1] / "eval/figures/qwen27b_three_category_body.tex"
     assert committed.read_text() == tikz
+    paper_copy = Path(__file__).resolve().parents[1] / "paper/figures/qwen27b_three_category_body.tex"
+    assert paper_copy.is_file(), "paper/figures copy required for standalone Overleaf compiles"
+    assert paper_copy.read_text() == tikz
     toks_values = []
     for row in decode_tier_rows():
         if row.get("toks") is not None:

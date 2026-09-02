@@ -55,6 +55,12 @@ def main() -> int:
     body_path = out_dir / "qwen27b_three_category_body.tex"
     body_path.write_text(body)
     print(f"wrote {body_path}")
+    paper_fig = ROOT / "paper" / "figures"
+    paper_fig.mkdir(parents=True, exist_ok=True)
+    paper_body = paper_fig / "qwen27b_three_category_body.tex"
+    if paper_body.resolve() != body_path.resolve():
+        paper_body.write_text(body)
+        print(f"wrote {paper_body}")
     if not args.compile and args.png is None:
         return 0
 
