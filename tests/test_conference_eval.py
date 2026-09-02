@@ -155,6 +155,12 @@ def test_figure_omits_headroom_and_prefill_headlines():
     paper_copy = Path(__file__).resolve().parents[1] / "paper/figures/qwen27b_three_category_body.tex"
     assert paper_copy.is_file(), "paper/figures copy required for standalone Overleaf compiles"
     assert paper_copy.read_text() == tikz
+    main_tex = Path(__file__).resolve().parents[1] / "paper/main.tex"
+    main = main_tex.read_text()
+    assert "\\begin{filecontents*}[overwrite]{refs.bib}" in main
+    assert "\\begin{tikzpicture}" in main
+    assert "\\IfFileExists" not in main
+    assert "../eval/figures/" not in main
     toks_values = []
     for row in decode_tier_rows():
         if row.get("toks") is not None:
