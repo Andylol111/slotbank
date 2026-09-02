@@ -1,0 +1,123 @@
+{
+  "kind": "pilot",
+  "machine": {
+    "id": "m4-air-24g",
+    "chip": "Apple M4",
+    "unified_gb": 24,
+    "gpu_cores_approx": 10,
+    "bandwidth_gbs": 120,
+    "fanless": true
+  },
+  "n_machines": 1,
+  "reference_execution": {
+    "definition": "Same quantized checkpoint, prompt token ids, sampler, and MLX implementation, without slot caching, speculation, or prefix restoration.",
+    "not_equivalent_to": "bf16 Qwen vendor card"
+  },
+  "moe_35b": {
+    "checkpoint": "Qwen3.5-35B-A3B-4bit",
+    "stored_gib": 19.02,
+    "expert_gib": 16.9,
+    "n_routed": 256,
+    "top_k": 8,
+    "baselines": {
+      "llama_cpp_q4": "cannot_run",
+      "mlx_lm_stock_toks": 0.005,
+      "mlx_vlm_full_bank": "killed_in_load"
+    },
+    "headline_c32": {
+      "cold_e2e_256": 4.2,
+      "warm_decode": 6.1,
+      "wired_gib": 3.8,
+      "n_cold": 1,
+      "note": "256-token run from process launch; fixed cost ~19 s"
+    },
+    "c_sweep_cold_e2e": {
+      "n_reps_per_c": 2,
+      "n_tokens": 256,
+      "clock": "cold_end_to_end",
+      "rows": [
+        {"C": 8, "active_gib": 1.88, "reps": [3.32, 4.19]},
+        {"C": 16, "active_gib": 2.41, "reps": [4.06, 4.30]},
+        {"C": 32, "active_gib": 3.46, "reps": [4.10, 4.88]},
+        {"C": 48, "active_gib": 4.52, "reps": [3.55, 4.57]},
+        {"C": 64, "active_gib": 5.57, "reps": [3.36, 3.78]},
+        {"C": 96, "active_gib": 7.68, "reps": [3.32]}
+      ]
+    },
+    "c_sweep_warm_decode": {
+      "n_reps_per_c": 2,
+      "clock": "warm_sustained_decode",
+      "rows": [
+        {"C": 8, "reps": [4.54, 5.78]},
+        {"C": 16, "reps": [5.62, 6.02]},
+        {"C": 32, "reps": [5.97, 7.15]},
+        {"C": 48, "reps": [5.20, 6.80]},
+        {"C": 64, "reps": [4.84, 5.27]},
+        {"C": 96, "reps": [4.82]}
+      ]
+    },
+    "alternating_warm_c32_c64": {
+      "n_reps": 3,
+      "order": "alternating",
+      "page_cache": "warm",
+      "c32_toks": [8.60, 8.74, 8.53],
+      "c64_toks": [7.35, 6.31, 5.93],
+      "c32_miss_per_call": 3.012,
+      "c64_miss_per_call": 2.089,
+      "c32_disk_mib_per_tok": [17.1, 15.5, 22.0],
+      "c64_disk_mib_per_tok": [24.2, 39.0, 41.5],
+      "routing_top32_pct": 53.7,
+      "routing_top64_pct": 76.2
+    },
+    "olmoe_negative": {
+      "stock_toks": [56.04, 54.63, 53.48],
+      "slots_c16_toks": [14.38, 18.04, 18.94],
+      "stock_gib": 3.656,
+      "slots_gib": 1.130
+    },
+    "compute_only_c32": {
+      "n_reps": 8,
+      "median_toks": 19.23,
+      "min_toks": 18.40,
+      "max_toks": 21.25
+    }
+  },
+  "dense_27b": {
+    "checkpoint": "Qwen3.8-27B-4bit",
+    "sidecar": "Qwen3.8-27B-MTP-4bit",
+    "date": "2026-08-31",
+    "thinking": false,
+    "vision": false,
+    "window_tokens": 64,
+    "prompt": "parse_iso_dates",
+    "n_prompts": 1,
+    "n_reps": 1,
+    "clocks": {
+      "greedy_toks": 5.71,
+      "mtp_k3_count": 13.47,
+      "mtp_k3_code": 9.95,
+      "dflash_k8_count": 11.76,
+      "dflash_k8_code": 9.10,
+      "prefill_819_s": 17.0,
+      "prefill_819_reuse_s": 0.88
+    },
+    "omlx_m3_max": {
+      "bw_gbs": 400,
+      "metal_decode": 19.8,
+      "mtp_decode": 32.6
+    },
+    "status": "pilot_characterization_not_the_conference_sweep"
+  },
+  "thermal": {
+    "status": "not_retimed",
+    "qualitative": "fanless soak roughly 60-70% of cool decode after 8-10 min",
+    "protocol": ["cool", "5min", "10min", "20min"]
+  },
+  "gaps": [
+    "48-prompt speculation suite on Metal",
+    "C-sweep with 5+ alternating cold reps",
+    "controlled thermal curve",
+    "second unified-memory machine",
+    "envelope task quality vs full OMP harness"
+  ]
+}
